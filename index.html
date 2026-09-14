@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>no-nonogram</title>
+  <link rel="stylesheet" href="./style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <defs>
+      <linearGradient id="cube-top-grad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#faeac0" />
+        <stop offset="1" stop-color="#eccf8e" />
+      </linearGradient>
+      <linearGradient id="cube-left-grad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#d9b06e" />
+        <stop offset="1" stop-color="#b78f4c" />
+      </linearGradient>
+      <linearGradient id="cube-right-grad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#a17f42" />
+        <stop offset="1" stop-color="#7c5f2e" />
+      </linearGradient>
+    </defs>
+  </svg>
+
+  <div id="app">
+    <section id="screen-main" class="screen hub">
+      <div class="brand">
+        <svg class="cube-mark" viewBox="0 0 100 116" aria-hidden="true">
+          <path d="M50 0 L100 29 L50 58 L0 29 Z" fill="url(#cube-top-grad)" />
+          <path d="M0 29 L50 58 L50 116 L0 87 Z" fill="url(#cube-left-grad)" />
+          <path d="M100 29 L50 58 L50 116 L100 87 Z" fill="url(#cube-right-grad)" />
+        </svg>
+        <div>
+          <h1>no-nonogram</h1>
+          <p class="subtitle">3D 노노그램</p>
+        </div>
+        <button class="menu-btn" id="btn-start">시작하기</button>
+      </div>
+    </section>
+
+    <section id="screen-levels" class="screen hub" hidden>
+      <header class="topbar">
+        <button class="icon-btn" id="btn-levels-back" title="뒤로">←</button>
+        <h2 class="screen-title">레벨 선택</h2>
+      </header>
+      <div id="levels-grid" class="card-grid"></div>
+    </section>
+
+    <section id="screen-puzzles" class="screen hub" hidden>
+      <header class="topbar">
+        <button class="icon-btn" id="btn-puzzles-back" title="뒤로">←</button>
+        <h2 class="screen-title" id="puzzles-title">Level 1</h2>
+      </header>
+      <div id="puzzles-grid" class="card-grid"></div>
+    </section>
+
+    <section id="screen-game" class="screen" hidden>
+      <header class="band band--top band--split">
+        <div class="puzzle-info">
+          <span id="dims-label" class="dims"></span>
+        </div>
+        <button id="btn-game-back" class="tag-btn" title="메뉴로">☰</button>
+      </header>
+
+      <div id="board">
+        <div class="clue-panel clue-panel--top">
+          <h2><span class="axis-dot axis-dot--y"></span>Y <small>(x × z)</small></h2>
+          <div id="clues-y" class="clue-grid"></div>
+        </div>
+        <div class="clue-panel clue-panel--left">
+          <h2><span class="axis-dot axis-dot--x"></span>X <small>(y × z)</small></h2>
+          <div id="clues-x" class="clue-grid"></div>
+        </div>
+        <div class="clue-panel clue-panel--right">
+          <h2><span class="axis-dot axis-dot--z"></span>Z <small>(x × y)</small></h2>
+          <div id="clues-z" class="clue-grid"></div>
+        </div>
+        <canvas id="scene"></canvas>
+      </div>
+
+      <footer class="band band--bottom">
+        <button id="undo" class="tag-btn" title="되돌리기">↺</button>
+        <div id="status"></div>
+      </footer>
+    </section>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

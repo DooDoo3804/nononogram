@@ -1,0 +1,352 @@
+:root {
+  color-scheme: light;
+  --paper: #ecdfc0;
+  --paper-deep: #ddcb9d;
+  --ink: #2c2417;
+  --ink-soft: #6b5a3c;
+  --gold: #b6934f;
+  --band: #26221e;
+  --band-fg: #eee0bd;
+
+  /* modern dark "hub" shell — main menu / level select / puzzle list */
+  --hub-0: #14100d;
+  --hub-1: #221a13;
+  --hub-fg: #f2e8d5;
+  --hub-fg-dim: rgba(242, 232, 213, 0.55);
+  --accent: #d9a441;
+  --accent-deep: #c98f2e;
+
+  --axis-x: #b5533f;
+  --axis-y: #5f8a52;
+  --axis-z: #4a6fa5;
+
+  --font-display: "Playfair Display", Georgia, serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  height: 100vh;
+  overflow: hidden;
+  font-family: Georgia, "Noto Serif KR", serif;
+  color: var(--ink);
+  background: var(--band);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.screen { display: flex; flex-direction: column; height: 100%; }
+.screen[hidden] { display: none; }
+
+.screen-title { margin: 0 0 0 1rem; font-family: var(--font-display); font-size: 1.3rem; font-weight: 700; letter-spacing: 0.02em; }
+
+/* --- modern dark hub shell: main menu / level select / puzzle list --- */
+.hub {
+  background:
+    radial-gradient(ellipse 900px 500px at 50% -10%, rgba(217, 164, 65, 0.14), transparent 60%),
+    linear-gradient(180deg, var(--hub-1), var(--hub-0));
+}
+
+#screen-main {
+  align-items: center;
+  justify-content: center;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.75rem;
+}
+
+.cube-mark { width: 56px; height: 65px; filter: drop-shadow(0 6px 10px rgba(0,0,0,.4)); }
+
+.brand h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 2.4rem;
+  letter-spacing: 0.01em;
+  color: var(--hub-fg);
+}
+
+.brand .subtitle {
+  margin: 0.35rem 0 0;
+  font-family: system-ui, sans-serif;
+  font-size: 0.85rem;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--hub-fg-dim);
+}
+
+.menu-btn {
+  font-family: system-ui, sans-serif;
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0.85rem 2.6rem;
+  border-radius: 999px;
+  border: none;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #241a0c;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.menu-btn:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.4); }
+.menu-btn:active { transform: translateY(0); }
+
+/* --- top bar for level select / puzzle list (flatter than the game's band) --- */
+.topbar {
+  flex: 0 0 60px;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0 1.25rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--hub-fg);
+}
+
+.icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--hub-fg);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.icon-btn:hover { background: rgba(255, 255, 255, 0.14); }
+
+.card-grid {
+  flex: 1;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 1rem;
+  padding: 1.25rem;
+  align-content: start;
+  perspective: 900px;
+}
+
+.level-card, .puzzle-card {
+  font-family: system-ui, sans-serif;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  background: linear-gradient(160deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+  color: var(--hub-fg);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  box-shadow: 0 6px 16px rgba(0,0,0,.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.level-card:hover, .puzzle-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(217, 164, 65, 0.5);
+  box-shadow: 0 10px 22px rgba(0,0,0,.45);
+}
+
+.level-card {
+  font-size: 1.05rem;
+  font-weight: 600;
+  min-height: 140px;
+  justify-content: center;
+  transform-style: preserve-3d;
+}
+
+.level-card:hover {
+  transform: translateY(-4px) rotateX(6deg) rotateY(-10deg);
+}
+
+.level-cube-icon {
+  width: 48px;
+  height: 56px;
+  filter: drop-shadow(0 6px 8px rgba(0,0,0,.45));
+  transition: transform 0.25s ease;
+}
+
+.level-card:hover .level-cube-icon {
+  transform: translateZ(24px) rotateY(14deg);
+}
+
+.level-name { transition: transform 0.25s ease; }
+.level-card:hover .level-name { transform: translateZ(10px); }
+
+.puzzle-card canvas {
+  border-radius: 14px;
+}
+
+.puzzle-card .puzzle-name { font-weight: 600; font-size: 0.85rem; }
+
+.puzzle-card .puzzle-status {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--hub-fg-dim);
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.puzzle-card .puzzle-status--progress { color: var(--accent); background: rgba(217, 164, 65, 0.14); }
+.puzzle-card .puzzle-status--solved { color: #8fd694; background: rgba(76, 175, 80, 0.14); }
+
+/* --- decorative woven bands (top/bottom), CSS-only medallion pattern --- */
+.band {
+  position: relative;
+  flex: 0 0 72px;
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+  background-color: var(--band);
+  background-image:
+    repeating-radial-gradient(circle at 0 0, transparent 0 12px, rgba(255,255,255,.08) 13px, rgba(255,255,255,.08) 14px, transparent 15px, transparent 28px),
+    repeating-radial-gradient(circle at 28px 28px, transparent 0 12px, rgba(255,255,255,.08) 13px, rgba(255,255,255,.08) 14px, transparent 15px, transparent 28px);
+  background-size: 28px 28px;
+  color: var(--band-fg);
+}
+
+.band--top { border-bottom: 3px solid var(--gold); }
+.band--bottom { border-top: 3px solid var(--gold); }
+.band--split { justify-content: space-between; }
+
+.puzzle-info {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+}
+
+.dims { font-size: 1rem; font-weight: bold; }
+
+#status {
+  margin-left: 1rem;
+  font-weight: bold;
+  color: var(--gold);
+}
+
+.tag-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px solid var(--gold);
+  background: linear-gradient(135deg, var(--paper), var(--paper-deep));
+  color: var(--ink);
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.4);
+  transition: transform 0.1s ease;
+}
+
+.tag-btn:hover { transform: scale(1.05); }
+.tag-btn:active { transform: scale(0.95); }
+
+/* --- parchment play area: clues framed around the cube on 3 sides --- */
+#board {
+  flex: 1;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "top   top   top"
+    "left  scene right";
+  gap: 0.75rem;
+  padding: 1rem;
+  min-height: 0;
+  background:
+    radial-gradient(ellipse at top left, rgba(255,255,255,.25), transparent 60%),
+    linear-gradient(var(--paper), var(--paper-deep));
+}
+
+.clue-panel--top { grid-area: top; max-height: 160px; }
+.clue-panel--left { grid-area: left; }
+.clue-panel--right { grid-area: right; }
+#scene { grid-area: scene; min-width: 0; min-height: 0; }
+
+.clue-panel {
+  background: rgba(255,255,255,0.25);
+  border: 1px solid var(--gold);
+  border-radius: 12px;
+  padding: 0.5rem;
+  overflow: auto;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* whichever axis the camera currently looks most directly along — that's the
+   clue table relevant to what you're about to fill, since panel position (top/
+   left/right) stops lining up with any fixed direction once you rotate freely.
+   A thin accent stripe on the edge nearest the cube, not a full glowing ring. */
+.clue-panel--left.clue-panel--active { box-shadow: inset 3px 0 0 var(--axis-x); background: linear-gradient(90deg, rgba(181, 83, 63, 0.12), rgba(255,255,255,0.25) 45%); }
+.clue-panel--top.clue-panel--active { box-shadow: inset 0 3px 0 var(--axis-y); background: linear-gradient(180deg, rgba(95, 138, 82, 0.12), rgba(255,255,255,0.25) 45%); }
+.clue-panel--right.clue-panel--active { box-shadow: inset -3px 0 0 var(--axis-z); background: linear-gradient(270deg, rgba(74, 111, 165, 0.12), rgba(255,255,255,0.25) 45%); }
+
+.clue-panel h2 {
+  display: flex;
+  align-items: center;
+  font-size: 0.85rem;
+  margin: 0 0 0.4rem;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.clue-panel h2 small { opacity: 0.8; text-transform: none; letter-spacing: normal; }
+
+.axis-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  flex: 0 0 auto;
+}
+.axis-dot--x { background: var(--axis-x); }
+.axis-dot--y { background: var(--axis-y); }
+.axis-dot--z { background: var(--axis-z); }
+
+.clue-grid {
+  display: grid;
+  gap: 1px;
+  background: var(--ink-soft);
+  border: 1px solid var(--ink-soft);
+}
+
+.clue-cell {
+  min-width: 1.7rem;
+  min-height: 1.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: var(--paper);
+  font-size: 0.72rem;
+  font-weight: bold;
+  color: var(--ink);
+  white-space: nowrap;
+  padding: 0 2px;
+}
+
+.clue-num--done {
+  text-decoration: line-through;
+  color: var(--ink-soft);
+  opacity: 0.45;
+}
+
+#scene {
+  width: 100%;
+  height: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--gold);
+  cursor: pointer;
+}
