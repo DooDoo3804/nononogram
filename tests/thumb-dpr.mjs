@@ -35,19 +35,26 @@
 // what the screen shows. A pixel is *fringe* if it is neither the voxel colour nor the
 // background: a blend the upscale invented. A 1x buffer on a 3x screen has to invent 8
 // of every 9 pixels; a buffer that matches the screen blends only where the drawing
-// genuinely has an edge. Measured at commit time:
+// genuinely has an edge.
 //
-//   viewport     dpr     before   after
-//   iphone-se    2       16.82%    5.79%
-//   galaxy-s     3       16.25%    8.92%
-//   pixel        2.625   16.26%    9.14%
-//   ipad         2       16.82%    5.79%
-//   desktop      1       10.39%   10.39%   <- unchanged, as it must be
+// It is read **against the 1x row**, not against a fixed percentage, because the raw
+// share is a property of the drawing as much as of the buffer. DOO-24 grew the
+// silhouette from 37% of the canvas to 74%, which put ~1.56x as much edge under the
+// sampler on every viewport at once — including the 1x one, where there is no upscale to
+// blame:
 //
-// Desktop's 10.39% is the floor, not a failure: a 100x100 raster antialiases its own
-// diagonals, and those blends are the drawing rather than the upscale. The DPR-2 rows
-// land *below* that floor because the same CSS-px edge is described by twice the
-// samples, so a smaller share of device pixels is a blend at all.
+//   viewport     dpr     1x buffer   DOO-21     DOO-24     vs its own 1x row
+//   iphone-se    2         16.82%     5.79%      8.69%     1.62x -> 0.56x -> 0.54x
+//   galaxy-s     3         16.25%     8.92%     12.89%     1.56x -> 0.86x -> 0.79x
+//   pixel        2.625     16.26%     9.14%     13.08%     1.56x -> 0.88x -> 0.81x
+//   ipad         2         16.82%     5.79%      8.69%     1.62x -> 0.56x -> 0.54x
+//   desktop      1         10.39%    10.39%     16.24%     the baseline itself
+//
+// The ratio is what the defect actually moves, and it moves it the other way: a matched
+// buffer lands *below* its own 1x row (the same CSS-px edge is described by more samples,
+// so a smaller share of device pixels is a blend at all), while the 1x-on-retina bug
+// lands ~1.6x above it. A fixed ceiling could not tell DOO-24's bigger drawing apart from
+// a lost buffer; this can, and it needs no recalibration the next time the art changes.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -75,11 +82,17 @@ const SHIPPED_DPR_CAP = 2;
 // two can disagree by a fraction of a pixel. 0.05 is 5x the slack needed and still
 // fails a 1x buffer on every retina viewport by a factor of 20.
 const DPR_TOLERANCE = 0.05;
-// The fringe ceiling, from the table above. The worst measured pass is 9.14% (pixel,
-// which upscales 2x -> 2.625x); the best fail is 16.25%. 12 sits between them with room
-// on both sides, and is a backstop for a change that keeps the buffer size but loses the
-// sharpness some other way — the ratio check above is the primary assertion.
-const MAX_FRINGE_PCT = 12;
+// The fringe ceiling, as a share of the 1x row's fringe (see the table above). The worst
+// measured pass is 0.81 (pixel, which still upscales 2x -> 2.625x); the defect sits at
+// 1.56-1.62. 1.0 is the natural line between them — "no worse than the same drawing with
+// nothing to upscale" — and leaves 23% of headroom over the worst pass. It is the backstop
+// for a change that keeps the buffer size but loses the sharpness some other way; the
+// backing/css ratio above is the primary assertion.
+const MAX_FRINGE_VS_1X = 1.0;
+// A blank canvas has no fringe at any ratio, which would pass the ratio check vacuously.
+// The 1x baseline has to actually contain a drawing: antialiased isometric diagonals over
+// most of a 100px card cannot come in under this.
+const MIN_BASELINE_FRINGE_PCT = 5;
 
 const BASE = process.argv[2] ?? 'http://127.0.0.1:4473';
 const OUT = process.argv[3] ?? 'qa-out/thumb';
@@ -144,6 +157,18 @@ const FRINGE = `
     }
     return { pct: +(100 * fringe / (w * w)).toFixed(2), of: w * w };
   }
+
+  // The same card with the defect put back: the buffer resampled down to the CSS size,
+  // which is what \`canvas.width = THUMB_SIZE\` produced before DOO-21. Feeding that to
+  // fringeShare upscales it to the device size exactly as the compositor would. Slightly
+  // conservative — a native 100px render antialiases a touch harder than a downsample of
+  // a 200px one — so if this still reads as a defect, the real one does too.
+  function as1x(src, cssWidth) {
+    const one = document.createElement('canvas');
+    one.width = one.height = Math.round(cssWidth);
+    one.getContext('2d').drawImage(src, 0, 0, one.width, one.height);
+    return fringeShare(one, cssWidth);
+  }
 `;
 
 // Walks the real menu — start, level 4, read the cards — so a card that renders only
@@ -169,6 +194,7 @@ const MEASURE = `(() => {
     bytes: cards.reduce((n, c) => n + c.width * c.height * 4, 0),
     box: { x: r.left, y: r.top, w: r.width, h: r.height },
     fringe: fringeShare(t, r.width),
+    fringeAs1x: as1x(t, r.width),
   };
 })()`;
 
@@ -202,16 +228,42 @@ try {
     check(`${vp.label}: thumbnail buffer is min(dpr, ${SHIPPED_DPR_CAP})x`, Math.abs(ratio - want) <= DPR_TOLERANCE, detail);
     check(`${vp.label}: CSS box unchanged at ${m.css}px square`, m.css === m.cssH && m.css === 100, `${m.css}x${m.cssH}`);
     check(`${vp.label}: buffer is square`, m.backing === m.backingH, `${m.backing}x${m.backingH}`);
-    check(
-      `${vp.label}: under ${MAX_FRINGE_PCT}% upscale fringe`,
-      m.fringe.pct < MAX_FRINGE_PCT || vp.deviceScaleFactor === 1,
-      `${m.fringe.pct}% of ${m.fringe.of} device px${vp.deviceScaleFactor === 1 ? ' (1x: the drawing’s own antialiasing, not an upscale)' : ''}`,
-    );
+    // The fringe assertions wait for the whole sweep: each one is read against the 1x
+    // row, which is the last viewport in the matrix.
 
     rows.push({
       vp: vp.label, dpr: m.dpr, css: m.css, backing: m.backing, ratio, want,
-      fringePct: m.fringe.pct, kb: Math.round(m.bytes / 1024), cards: m.cards, seeded,
+      fringePct: m.fringe.pct, fringeAs1xPct: m.fringeAs1x.pct,
+      kb: Math.round(m.bytes / 1024), cards: m.cards, seeded,
     });
+  }
+
+  // Fringe, now that the 1x row exists to read the retina rows against. Same drawing,
+  // same sampler, same inset — the only difference between the rows is how many device
+  // pixels the buffer brought, which is the whole question.
+  const baseline = rows.find((r) => r.dpr === 1);
+  check(
+    'the 1x row is present and actually contains a drawing',
+    baseline !== undefined && baseline.fringePct >= MIN_BASELINE_FRINGE_PCT,
+    baseline ? `${baseline.fringePct}% at 1x (floor ${MIN_BASELINE_FRINGE_PCT}%)` : 'no 1x viewport in the matrix',
+  );
+  for (const r of rows) {
+    if (r.dpr === 1) continue;
+    const vs = +(r.fringePct / baseline.fringePct).toFixed(3);
+    check(
+      `${r.vp}: fringe no worse than the same card at 1x (<= ${MAX_FRINGE_VS_1X}x)`,
+      vs <= MAX_FRINGE_VS_1X,
+      `${r.fringePct}% vs ${baseline.fringePct}% at 1x = ${vs}x`,
+    );
+    // Guards the guard. Reading fringe as a ratio instead of a fixed percentage is only
+    // worth doing if the ratio still convicts the defect — so put the defect back on this
+    // very card and watch the same check reject it.
+    const defect = +(r.fringeAs1xPct / baseline.fringePct).toFixed(3);
+    check(
+      `${r.vp}: and the check still convicts a 1x buffer on this card`,
+      defect > MAX_FRINGE_VS_1X,
+      `resampled to 1x: ${r.fringeAs1xPct}% = ${defect}x, over the ${MAX_FRINGE_VS_1X}x line`,
+    );
   }
 
   // The matrix itself has to exercise the cap, or the first check degenerates into
@@ -225,10 +277,12 @@ try {
 
 const pad = (s, n) => String(s).padEnd(n);
 console.log(`\n[${LABEL}] level 4, first card, ${rows[0]?.cards ?? 0} thumbnails live\n`);
-console.log(`${pad('viewport', 16)}${pad('dpr', 8)}${pad('css', 7)}${pad('backing', 10)}${pad('backing/css', 13)}${pad('fringe', 10)}all buffers`);
+console.log(`${pad('viewport', 16)}${pad('dpr', 8)}${pad('css', 7)}${pad('backing', 10)}${pad('backing/css', 13)}${pad('fringe', 10)}${pad('vs 1x', 9)}all buffers`);
+const base1x = rows.find((r) => r.dpr === 1)?.fringePct;
 for (const r of rows) {
+  const vs = r.dpr === 1 || !base1x ? '—' : `${(r.fringePct / base1x).toFixed(2)}x`;
   console.log(
-    `${pad(r.vp, 16)}${pad(r.dpr, 8)}${pad(r.css, 7)}${pad(r.backing, 10)}${pad(r.ratio, 13)}${pad(`${r.fringePct}%`, 10)}${r.kb} KB`,
+    `${pad(r.vp, 16)}${pad(r.dpr, 8)}${pad(r.css, 7)}${pad(r.backing, 10)}${pad(r.ratio, 13)}${pad(`${r.fringePct}%`, 10)}${pad(vs, 9)}${r.kb} KB`,
   );
 }
 

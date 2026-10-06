@@ -4,3 +4,4 @@ verify-out/
 coverage/
 .DS_Store
 *.local
+qa-out/
