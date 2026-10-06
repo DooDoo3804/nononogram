@@ -1143,6 +1143,32 @@ DOO-8이 말한 다른 하나, "회전 중 방향 상실". `ui/clues.js`가 카�
 플레이는 합격 기준의 첫 두 줄이고, 그걸 채우지 않은 채로 판정을 움직이면 §13이 철회한
 것과 같은 종류의 근거 없는 전환이 된다.
 
+#### 다음 런이 이어받을 지점 (스크래치는 지워지므로 여기에 적는다)
+
+§16.1이 적은 사고가 바로 이것 때문에 났다 — 직전 런의 재개 정보가 지워지는 곳에만
+있었다. 그래서 커밋되는 파일에 남긴다.
+
+| | |
+|---|---|
+| 스냅샷 | `qa-out/doo8/snap` (리포 안, gitignore. `git archive 1a083ed`) |
+| 서버 | `qa-out/doo8/snap` 에서 `npx vite preview --port 4294 --strictPort --host 127.0.0.1` |
+| 에셋 해시 확인 | `curl -s http://127.0.0.1:4294/ \| grep -oE 'main-[A-Za-z0-9_-]+\.js'` → **`main-DcHC9AhU.js`** 여야 한다 |
+| 드라이버 | `qa-out/doo8/drive.sh` (4단계 순차). 진행 상황은 `qa-out/doo8/drive.log` |
+| 단계별 로그 | `qa-out/doo8/{reach,play}-{desktop,mobile}.log` |
+| 산출물 | `qa-out/doo8/out/reach-{desktop,mobile}.json` (박스마다 증분 기록), `playtest-{mode}-{platform}.json` |
+| 살아 있는지 | `pgrep -f drive.sh` 와 `pgrep -f playtest.mjs` |
+
+**드라이버가 죽어 있으면** 서버를 먼저 띄우고 해시를 확인한 뒤 `./qa-out/doo8/drive.sh`를
+다시 돌리면 된다 — 1단계부터 다시 돌지만 `reach-desktop.json`이 이미 있으면 `play`만
+따로 돌릴 수도 있다 (`node tests/playtest.mjs play http://127.0.0.1:4294 qa-out/doo8/out
+--platform=desktop`).
+
+**부하를 먼저 확인할 것.** 이 런에서 직전 런들이 남긴 프로세스 3개가 살아 있었고, 그중
+하나는 **404를 돌려주는 서버를 상대로 9시간 58분** reach를 돌고 있었다 (도큐먼트 루트가
+지워진 포트 4273). 전부 종료하자 load가 **362 → 207**로 떨어졌다. 다음 런도
+`ps -eo pid,etime,command | grep playtest` 로 먼저 훑고, 도큐먼트 루트가 실재하지 않는
+서버를 상대로 도는 좀비가 있으면 정리한 뒤 측정을 시작하는 게 맞다.
+
 ### 16.6 버려진 스텝의 두 번째 원인 — 박스 **안**에서는 수렴 오라클이 설 땅이 없다
 
 §15.1이 "부하로 수렴 실패"라고 묶어둔 스텝들은 원인이 **두 가지**고, 둘 다 부하가
