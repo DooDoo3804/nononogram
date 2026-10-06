@@ -181,6 +181,65 @@ const PROBE = `(() => {
     return i;
   }
 
+  /**
+   * Make the board un-completable for the duration of a probe sweep.
+   *
+   * A synthetic tap goes through the production \`cycle()\`, which is
+   * \`set(i, next, { undoable: true })\` — and \`set\` latches \`solved\` the instant the
+   * FILLED set equals the solution. The restore that every probe does afterwards is a
+   * plain \`set\`, which by design does *not* respect the solved lock. So a probe that
+   * happens to complete the board leaves the session latched \`solved\` on a board that
+   * is one cell short, and from then on \`cycle()\` returns null and no real tap can
+   * change anything. The playthrough is handed its clear by the harness instead of by
+   * the player's input, and the cell the probe was hunting for is unfillable for good.
+   *
+   * \`settle(probe: false)\` already exists to dodge this on the camera path. \`findPixel\`
+   * cannot dodge it the same way — its whole job is to probe a part-played board, and
+   * the board it is called on is by definition missing the cell being hunted, which on
+   * the last group of a playthrough is the only one still missing.
+   *
+   * The guard parks one cell the solution does *not* want as FILLED. \`isSolved\` is a
+   * cell-by-cell compare, so a single wrong filled cell keeps it false for the whole
+   * sweep no matter what the probes land on. \`park\` is returned so the per-tap restores
+   * can leave it alone; the caller's final restore-to-\`before\` loop unparks it, and that
+   * \`set\` re-runs the latch check against the real board.
+   *
+   * \`peek\` is deliberately not guarded: \`settle\` only probes a blank board, and one tap
+   * on a blank board can only complete a one-cell solution, which no shipped puzzle is.
+   */
+  function latchGuard(before) {
+    const s = session();
+    const park = Array.prototype.findIndex.call(s.solution, (v) => !v);
+    // A solution wanting every cell in the box cannot be guarded this way — and could
+    // not be a puzzle either (a full box carries no clue information). Reported rather
+    // than silently probed without a guard.
+    if (park < 0) return { park: -1, guarded: false };
+    if (before[park] !== 1) s.set(park, 1);
+    return { park, guarded: true };
+  }
+
+  /**
+   * Put the board back to \`before\`, releasing \`latchGuard\`'s parked cell last.
+   *
+   * The order is the whole point, and getting it wrong reintroduces the exact bug the
+   * guard exists to stop. Restoring in index order releases the park while the probe's
+   * last tap is still on the board — so if that tap was the one cell the board was
+   * missing, the board passes *through* the solution between unparking cell \`park\` and
+   * clearing the tapped cell. \`set\` runs its latch check on every write, including those
+   * intermediate ones, so \`solved\` latches on a state that existed for one statement.
+   * (Measured: l1-plus parks cell 0 and probes cell 22, and index-order restore latched
+   * on every single run.) Clearing every other cell first means the park is released
+   * onto a board already short at least one cell.
+   */
+  function unwind(before, park) {
+    const s = session();
+    for (let i = 0; i < s.state.length; i++) {
+      if (i === park) continue;
+      if (s.state[i] !== before[i]) s.set(i, before[i]);
+    }
+    if (park >= 0 && s.state[park] !== before[park]) s.set(park, before[park]);
+  }
+
   // --- the three camera gestures ---------------------------------------------
   // Closures rather than methods on the returned object, so \`act()\` can dispatch one
   // and start settling it without a round trip in between — see \`act()\`. The object
@@ -620,27 +679,43 @@ const PROBE = `(() => {
      * hitting the cell behind it. So the recorded pixel is treated as a hint and the
      * exact pixel is re-derived against the camera as it actually is.
      *
-     * -> { px, samples, radius } | null
+     * Probing mutates the board through the production cycle, so it runs under
+     * \`latchGuard\` — read that for why a probe could otherwise hand the playthrough its
+     * clear. \`guarded\` and \`solved\` ride along in the result so the caller can assert
+     * the guard held instead of taking it on trust.
+     *
+     * -> { px, samples, radius, guarded, solved }, \`px: null\` if nothing reached the cell
      */
     findPixel(cell, hint, radius = 14, step = 2) {
-      listen();
       const s = session();
+      const solvedAtEntry = s.solved;
       // A playthrough calls this with cells already filled from earlier groups, so the
       // probe has to put the board back exactly, not blank it.
       const before = Array.from(s.state);
+      // Park before listening: the park is a \`set\`, so it emits a 'cell' event of its own.
+      const guard = latchGuard(before);
+      let latchedAt = null;
+      listen();
       const hits = [];
       for (let dy = -radius; dy <= radius; dy += step) {
         for (let dx = -radius; dx <= radius; dx += step) {
           const px = hint[0] + dx, py = hint[1] + dy;
           const i = tap(px, py);
           if (i === null) continue;
-          s.set(i, before[i]);
+          if (!latchedAt && s.solved) {
+            latchedAt = { i, px, py, parkValue: s.state[guard.park],
+              filled: Array.prototype.filter.call(s.state, (v) => v === 1).length,
+              state: Array.from(s.state).join('') };
+          }
+          // Restore the cell this tap touched — except the parked one, which has to stay
+          // parked for the rest of the sweep or the guard lapses mid-probe.
+          s.set(i, i === guard.park ? 1 : before[i]);
           if (i === cell) hits.push([px, py]);
         }
       }
       if (!hits.length) {
-        for (let i = 0; i < s.state.length; i++) if (s.state[i] !== before[i]) s.set(i, before[i]);
-        return null;
+        unwind(before, guard.park);
+        return { px: null, samples: 0, radius, guarded: guard.guarded, solved: s.solved, solvedAtEntry, park: guard.park, latchedAt };
       }
       // Centroid of the local hits, then confirm it still lands on the cell.
       const cx = Math.round(hits.reduce((a, p) => a + p[0], 0) / hits.length);
@@ -653,9 +728,9 @@ const PROBE = `(() => {
           if (d < bestD) { bestD = d; px = p; }
         }
       }
-      // leave the board exactly as we found it
-      for (let i = 0; i < s.state.length; i++) if (s.state[i] !== before[i]) s.set(i, before[i]);
-      return { px, samples: hits.length, radius };
+      // leave the board exactly as we found it — park released last, see \`unwind\`.
+      unwind(before, guard.park);
+      return { px, samples: hits.length, radius, guarded: guard.guarded, solved: s.solved, solvedAtEntry, park: guard.park, latchedAt };
     },
 
     /** Whatever element the browser would route a tap at (px, py) to. */
@@ -1286,6 +1361,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
   const startedAt = Date.now();
   let clicks = 0;
   const misses = [];
+  const probeLatches = [];
 
   for (const [stepName, group] of groups) {
     // `fresh: false` is load-bearing: a fresh open drops the puzzle's saved board, which
@@ -1308,9 +1384,17 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     const located = await page
       .evaluate(`JSON.stringify(${JSON.stringify(wanted)}.map((w) => {
         const f = window.__qa.findPixel(w.cell, w.px, 14, 2);
-        return f ? { cell: w.cell, px: f.px, samples: f.samples } : { cell: w.cell, px: null };
+        return { cell: w.cell, px: f.px, samples: f.samples, guarded: f.guarded, solved: f.solved, solvedAtEntry: f.solvedAtEntry, park: f.park, latchedAt: f.latchedAt };
       }))`)
       .then(JSON.parse);
+
+    // The probe must not have latched `solved` on this part-played board — see
+    // `latchGuard`. Asserted per group rather than trusted, because the failure is
+    // silent in exactly the direction that flatters the verdict: a latched board awards
+    // `solved`, `celebrated` and a solved record while the cell under the probe becomes
+    // permanently unfillable by any real tap.
+    probeLatches.push(...located.filter((l) => l.solved || l.guarded === false)
+      .map((l) => ({ cell: l.cell, stepName, guarded: l.guarded, solved: l.solved, solvedAtEntry: l.solvedAtEntry, park: l.park, latchedAt: l.latchedAt })));
 
     const todo = [];
     for (const l of located) {
@@ -1381,6 +1465,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     corrections,
     stranded,
     misses,
+    probeLatches,
     solved,
     wrongCells: wrong,
     celebrated,
@@ -1388,6 +1473,14 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     elapsedMs: Date.now() - startedAt,
   };
 
+  // Before any verdict reads `solved`: this clear came from real input and not from the
+  // harness's own probe. Without it, the three checks below are satisfiable by a bug in
+  // this file (DOO-36).
+  check(
+    `${platform.label} ${entry.id}: no probe latched solved mid-playthrough`,
+    probeLatches.length === 0,
+    JSON.stringify(probeLatches.slice(0, 3)),
+  );
   check(
     `${platform.label} ${entry.id}: finished with real ${platform.touch ? 'taps' : 'clicks'} only`,
     solved && stranded.length === 0 && misses.length === 0,
