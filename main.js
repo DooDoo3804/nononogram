@@ -18,6 +18,7 @@ import { mountMenu } from './ui/menu.js';
 import { mountClues } from './ui/clues.js';
 import { mountHud } from './ui/hud.js';
 import { mountGestures } from './ui/gestures.js';
+import { mountPeelControl } from './ui/peel.js';
 import { mountRewards } from './fx/index.js';
 
 const SOLVED_TEXT = 'Solved! 🎉';
@@ -105,6 +106,11 @@ function openPuzzle(spec) {
   session.on('solved', () => hud.setStatus(SOLVED_TEXT));
 
   rewards.openPuzzle({ session, grid });
+  // The depth cursor zeroes itself on a new grid, so this is the readout catching up —
+  // and the one place the level is known, which is what decides whether the player
+  // gets the one-time lesson (DOO-28: level 3 is where a board first has cells the
+  // cursor is the only way to reach).
+  peelControl.openPuzzle(spec);
 
   screens.show('screen-game');
   view.resize();
@@ -152,16 +158,25 @@ window.addEventListener('resize', () => view.resize());
 // the cells in front of it (DOO-17). Mounted here and nowhere else: the cursor is a
 // view onto the board, so nothing in `state/` knows it exists.
 //
-// The keyboard binding is a desktop stopgap. The on-screen control, and teaching the
-// player it is there, is DOO-28 on the UI/UX track — it should drive this object
-// rather than reach into the grid.
+// The keys stay bound here (`scripts/probe-aim.mjs` drives the cursor with real key
+// events, so DOO-17's numbers measure the binding a player uses); DOO-28 adds the
+// on-screen stepper beside them in `ui/peel.js`, which drives this same object and
+// reads back from `state()` so a key press and a button press agree.
 const peel = mountPeel({ view, getGrid: () => grid });
+const peelControl = mountPeelControl({
+  peel,
+  view,
+  getDims: () => session?.dims ?? null,
+});
 
 // perf brackets the whole frame — callbacks, controls and the draw call — so
 // `cpuMs` is the number with head room in it, not the vsync-capped frame gap.
-view.onFrame(() => {
+view.onFrame((dt) => {
   perf.beginFrame();
   clues.setActiveAxis(view.facingAxis());
+  // Throttled to 10Hz inside the module — the readout has to follow `[`/`]` and the
+  // camera's face, neither of which reports a change, and neither of which needs more.
+  peelControl.sync(dt);
 });
 view.onFrameEnd(() => perf.endFrame());
 view.start();
@@ -193,4 +208,8 @@ window.__nonogram = {
   // events and reads this to assert where it landed. A setter here would let a
   // measurement pass while the binding a player uses stayed broken.
   peel: () => peel.state(),
+  // What the stepper is *showing*, which is not always `peel.state()`: at depth 0 it
+  // names the face the next press will take off, and past it, both. The DOO-28 probe
+  // clicks `#peel-more` like a player does and reads this to assert the two agree.
+  peelUi: () => peelControl.model(),
 };

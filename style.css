@@ -258,6 +258,21 @@ body {
   color: var(--gold);
 }
 
+/* Visually hidden, still read aloud. The peel readout's live region uses it: the
+   stepper's own text is three glyphs of shorthand (`X 2/5`), which is right for a 48px
+   band and useless as a spoken announcement. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .tag-btn {
   width: 44px;
   height: 44px;
@@ -308,6 +323,183 @@ body {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   border-color: #fff0c8;
 }
+
+/* --- depth cursor stepper (DOO-28) ---------------------------------------------
+   One pill, three targets: cover a layer, the readout (which doubles as "whole board
+   again"), peel a layer. 48px tall, which is the whole band — the 2px border leaves
+   each segment 44×44, the thumb floor, and the pill has no dead gaps between them to
+   miss into. 44px of pill height would have left the segments at 40 and the floor is
+   the one number on this control that is not a matter of taste; `probe-peel-ui.mjs`
+   measures all three on every layout rather than trusting the arithmetic.
+
+   Fixed width, not content width. The readout's text changes as the player steps and as
+   they rotate (`→ Z` appears when the next press will switch faces), and a pill that
+   resized for it would slide the `+` button out from under a thumb that is holding it
+   down. `.peel__next` reserves its slot with `visibility`, and `min-width` here keeps
+   the single-digit depths from narrowing it. */
+.peel {
+  display: flex;
+  align-items: stretch;
+  height: 48px;
+  margin-left: 0.4rem;
+  border: 2px solid var(--gold);
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--paper), var(--paper-deep));
+  box-shadow: 0 2px 6px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.4);
+  overflow: hidden;
+  font-family: system-ui, sans-serif;
+  color: var(--ink);
+}
+
+.peel__btn,
+.peel__readout {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.peel__btn {
+  flex: 0 0 44px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Dividers rather than gaps: the three segments stay one object, which is what makes
+   the whole pill read as a single control instead of three loose buttons. */
+.peel__readout {
+  flex: 1 1 auto;
+  min-width: 92px;
+  gap: 0.15rem;
+  padding: 0 0.3rem;
+  border-inline: 1px solid rgba(44, 36, 23, 0.25);
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.peel .axis-dot { margin-right: 0.2rem; width: 7px; height: 7px; }
+.peel__axis { display: inline-flex; align-items: center; }
+.peel__depth { margin-left: 0.1rem; }
+.peel__next { display: inline-flex; align-items: center; margin-left: 0.25rem; opacity: 0.85; }
+.peel__arrow { margin-right: 0.15rem; }
+
+.peel__btn:active { background: rgba(44, 36, 23, 0.12); }
+/* A disabled segment is the honest signal that the cursor is at an end — greyed, not
+   gone, so the pill keeps its shape and the player keeps their aim. */
+.peel__btn:disabled,
+.peel__readout:disabled { opacity: 0.38; cursor: default; }
+/* At depth 0 nothing is peeled, so the readout is a plain label; past that it is also
+   the way back to the whole board, and the accent says it became a button. */
+.peel[data-peeled='1'] { border-color: #fff0c8; }
+.peel[data-peeled='1'] .peel__readout { background: rgba(217, 164, 65, 0.22); }
+
+/* The one focus ring this file has. Scoped rather than global on purpose: a visible
+   ring on every control is its own change to every screen, and this stepper is the one
+   whose keyboard path (`[`/`]`/`\` on the cursor itself) a player can also reach by
+   tabbing into three segments that look identical. */
+.peel__btn:focus-visible,
+.peel__readout:focus-visible,
+.peel-coach__close:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+
+/* --- teaching it, once ---------------------------------------------------------
+   Level 3 is where the board first has cells the cursor is the only way to reach, so
+   that is where the lesson is. `role="status"`, no focus trap, no backdrop: a player who
+   answers it by starting to play is answering it correctly, and `ui/peel.js` drops it on
+   the first use of the control for that reason.
+
+   Anchored to the band (`.band` is `position: relative`) instead of to the pill, so the
+   landscape clause can re-point it by flipping two properties and there is nothing to
+   measure at show time. No tail — across three layouts a tail is three chances to point
+   at the wrong thing; the pill glows instead, which survives any of them. */
+.peel-coach {
+  position: absolute;
+  left: 0.5rem;
+  right: 0.5rem;
+  bottom: calc(100% + 0.6rem);
+  z-index: 20;
+  max-width: 26rem;
+  /* Left-aligned, not centred: the pill is the leftmost thing in the band after undo,
+     and a centred card on a 1280px band sat 330px away from what it was talking about.
+     With no tail, proximity is the only thing tying the two together. */
+  margin-inline: 0;
+  padding: 0.7rem 0.85rem;
+  border: 2px solid var(--gold);
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--paper), var(--paper-deep));
+  box-shadow: 0 6px 18px rgba(0,0,0,.45);
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  opacity: 0;
+  transform: translateY(0.4rem);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.peel-coach[hidden] { display: none; }
+.peel-coach--on { opacity: 1; transform: none; }
+
+.peel-coach__text {
+  margin: 0;
+  flex: 1 1 auto;
+  font-family: system-ui, sans-serif;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.peel-coach__text b { color: var(--ink); background: rgba(217, 164, 65, 0.3); border-radius: 3px; padding: 0 2px; }
+
+.peel-coach__close {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 0.9rem;
+  border: 2px solid var(--gold);
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: var(--ink);
+  font-family: system-ui, sans-serif;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* While the card is up the pill it names is the only lit thing in the band. */
+.peel[data-coach='1'] { border-color: #fff0c8; box-shadow: 0 0 0 3px rgba(217, 164, 65, 0.55), 0 2px 6px rgba(0,0,0,.3); }
+
+/* Motion is opt-in, and the switch is `fx/index.js`'s `.fx-motion` on the root — it
+   already folds the OS `prefers-reduced-motion` together with the in-game toggle, so
+   reading it here keeps one answer instead of two. No class (fx absent) means no
+   animation, which is the safe direction. The media query stands alone for the case
+   where this file is loaded without the reward layer at all. */
+html:not(.fx-motion) .peel-coach { transition: none; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .peel-coach { transition: none; transform: none; }
+}
+
+/* Under ~400px the band carries undo, this pill and fx's hint/mute pair across 344px of
+   usable width. The segments do not give any of it back — 44px is the floor, not a
+   preference — so the readout does: smaller type and a tighter floor, which still holds
+   `● Z 2/5 → ● X` without wrapping. */
+@media (max-width: 400px) {
+  .peel { margin-left: 0.25rem; }
+  .peel__readout { min-width: 84px; font-size: 0.72rem; padding: 0 0.2rem; }
+}
+
+/* A solved board locks input (`state/session.js`), so the cursor has nothing left to
+   aim at — and on a 360px band "Solved! 🎉" plus this pill plus undo plus fx's pair does
+   not fit, which would push a control off the edge at the exact moment the player is
+   being congratulated. The band's job is the result now. `ui/hud.js` sets the flag from
+   the same call that writes the status text, so the two can never disagree. */
+.band--solved .peel { display: none; }
 
 /* --- parchment play area ------------------------------------------------------
    Written narrow-first, which is the whole fix for DOO-13/DOO-18. The old rules were
@@ -570,6 +762,42 @@ body {
      floor; 12rem is where a 6-column table stops needing to scroll sideways. */
   .clue-panel--shown { width: clamp(9rem, 26vw, 12rem); height: auto; }
   .clue-tab { padding: 0 0.1rem; font-size: 0.8rem; }
+
+  /* The stepper stands up with its band. `column-reverse` against the source order
+     (− / readout / +) puts `+` on top, because peeling goes *into* the box and a rail
+     reads bottom-up as near-to-far; the readout stacks into its three rows. 44px wide
+     is still the thumb floor on the axis that is now the short one. */
+  .peel {
+    flex-direction: column-reverse;
+    width: 48px;
+    height: auto;
+    margin-left: 0;
+    border-radius: 24px;
+  }
+  .peel__readout {
+    flex-direction: column;
+    gap: 0;
+    width: 100%;
+    min-width: 0;
+    padding: 0.3rem 0;
+    border-inline: 0;
+    border-block: 1px solid rgba(44, 36, 23, 0.25);
+    font-size: 0.62rem;
+    line-height: 1.3;
+  }
+  .peel .axis-dot { margin-right: 0.12rem; }
+  .peel__depth { margin-left: 0; }
+  .peel__next { margin-left: 0; }
+
+  /* The rail is on the right in landscape, so the card points across at it instead of
+     up at it, and sits against the bottom where the pill is. */
+  .peel-coach {
+    left: auto;
+    right: calc(100% + 0.5rem);
+    bottom: 0.5rem;
+    width: min(22rem, 54vw);
+    margin-inline: 0;
+  }
 }
 
 /* --- wide: the three clue tables frame the cube -------------------------------
@@ -599,6 +827,15 @@ body {
   .band { flex: 0 0 72px; padding: 0 1rem; }
   .dims { font-size: 1rem; }
   #status { margin-left: 1rem; font-size: 1rem; }
+
+  /* A 72px band has room, and this is the layout where the keyboard shortcuts in the
+     segments' tooltips are reachable, so the pill grows into the space rather than
+     staying phone-sized next to a 1rem status line. */
+  .peel { height: 48px; margin-left: 0.75rem; }
+  .peel__btn { flex-basis: 44px; font-size: 1.35rem; }
+  .peel__readout { min-width: 104px; font-size: 0.85rem; gap: 0.2rem; }
+  .peel-coach { bottom: calc(100% + 0.9rem); max-width: 30rem; }
+  .peel-coach__text { font-size: 0.88rem; }
 
   /* All three at once, and the heading is back — it is the only thing naming which two
      axes a table is indexed by once there is no selected tab to say so. */

@@ -20,8 +20,14 @@ export function mountHud({ onUndo, onToggleMode } = {}) {
   if (onToggleMode) modeBtn?.addEventListener('click', onToggleMode);
 
   return {
+    // The status line is only ever written when the board is finished, so it doubles as
+    // the band's "this puzzle is over" flag. The depth-cursor stepper hides on it: a
+    // solved session refuses input, so the cursor has nothing left to aim at, and at
+    // 360px the celebration text and the stepper cannot both fit in the band. Set here
+    // rather than from a second call site so the flag cannot drift from the text.
     setStatus(text) {
       statusEl.textContent = text;
+      statusEl.closest('.band')?.classList.toggle('band--solved', !!text);
     },
     setDims(text) {
       dimsEl.textContent = text;

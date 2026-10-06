@@ -117,7 +117,49 @@
 
       <footer class="band band--bottom">
         <button id="undo" class="tag-btn" title="되돌리기">↺</button>
+
+        <!-- The depth cursor (render/peel.js) peels the front layers off the box so an
+             interior cell becomes a full cell-sized target instead of a sliver between
+             the cells in front of it. It shipped on `[`/`]` alone, which is to say it
+             did not exist on touch and nobody on desktop had a reason to find it — this
+             stepper is the affordance, and `ui/peel.js` explains why the readout names
+             the axis and sometimes two of them. -->
+        <div id="peel" class="peel" role="group" aria-label="깊이 커서 — 앞쪽 레이어 벗기기" data-peeled="0">
+          <button id="peel-less" class="peel__btn" type="button" aria-label="한 겹 덮기 ([)">−</button>
+          <!-- The readout doubles as "back to the whole board", which is `\` on desktop
+               and otherwise unreachable without pressing − all the way down. Disabled,
+               not hidden, at depth 0 so the pill never changes width. -->
+          <button id="peel-readout" class="peel__readout" type="button" aria-label="벗긴 겹 없음" disabled>
+            <!-- Dot and letter are one box so the landscape rail can stack the readout
+                 into three rows (axis / depth / next axis) without the dot orphaning
+                 onto a line of its own. The letter is never dropped: hue alone would
+                 make the axis invisible to a colour-blind player. -->
+            <span class="peel__axis">
+              <span class="axis-dot axis-dot--x" id="peel-dot"></span><span id="peel-axis">X</span>
+            </span>
+            <span class="peel__depth" id="peel-depth">0/0</span>
+            <span class="peel__next" id="peel-next" aria-hidden="true" style="visibility: hidden">
+              <span class="peel__arrow">→</span>
+              <span class="axis-dot axis-dot--z" id="peel-next-dot"></span>
+              <span id="peel-next-axis">Z</span>
+            </span>
+          </button>
+          <button id="peel-more" class="peel__btn" type="button" aria-label="한 겹 벗기기 (])">+</button>
+          <span id="peel-live" class="sr-only" aria-live="polite"></span>
+        </div>
+
         <div id="status"></div>
+
+        <!-- Anchored by CSS to the band above `#peel` (`.band` is the positioned
+             ancestor), so there is nothing to measure and nothing to keep in sync when
+             the landscape clause stands the band up on its side. -->
+        <div id="peel-coach" class="peel-coach" role="status" hidden>
+          <p class="peel-coach__text">
+            5³부터는 <b>속이 가려져</b> 안쪽 칸을 누를 수가 없다.
+            <b>깊이 커서</b>로 보고 있는 쪽 겹을 벗기면 안쪽 칸이 제 크기로 드러난다.
+          </p>
+          <button id="peel-coach-close" class="peel-coach__close" type="button">알겠어요</button>
+        </div>
       </footer>
     </section>
   </div>
