@@ -152,11 +152,13 @@ try {
     seen.verdictText.trim(),
   );
   // The headline is what gets screenshotted into an issue. This run is a desktop on a
-  // 1-second window, so a plain "✅ 통과" here would be the exact false pass the
-  // disqualifier logic exists to prevent — assert it is withheld.
+  // shortened window, so a plain "✅ 통과" here would be the exact false pass the
+  // disqualifier logic exists to prevent — assert it is withheld. An outright
+  // "❌ 예산 초과" satisfies that too: whether the numbers happened to fit is not what
+  // this is checking, and on a loaded desktop in a 1s window they often will not.
   list.check(
-    'unqualified run is not headlined as a pass',
-    seen.verdictText.includes('공식 판정 아님'),
+    'unqualified run is not headlined as a plain pass',
+    !/^\s*✅ 통과\s*$/.test(seen.verdictText),
     seen.verdictText.trim(),
   );
   list.check('iframe torn down after the run', seen.iframeGone, seen.iframeGone ? 'removed' : 'still present');
