@@ -164,6 +164,11 @@ try {
   list.check('iframe torn down after the run', seen.iframeGone, seen.iframeGone ? 'removed' : 'still present');
   list.check('verdict has the gate lines', seen.lines.length >= 8, `${seen.lines.length} lines`);
 
+  // The thermal line compares pass 2 against pass 1, so it only exists on a multi-pass
+  // run. Demanding it unconditionally made this self-check fail on its own single-pass
+  // invocations — a check that is wrong about the thing it guards is worse than absent.
+  const passCount = Number(new URLSearchParams(QUERY).get('passes') ?? 2);
+
   for (const needle of [
     'p95 ≤ 20ms',
     'draw calls do not grow',
@@ -172,7 +177,7 @@ try {
     'instance raycast picks',
     'GPU raster inside the 60fps budget',
     'drawing buffer sits at min(DPR, 2)',
-    'no thermal regression',
+    ...(passCount > 1 ? ['no thermal regression'] : []),
   ]) {
     const line = nameOf(needle);
     list.check(`gate line present: ${needle}`, !!line, line ? `${line.mark} ${line.detail.slice(0, 70)}` : 'MISSING');
