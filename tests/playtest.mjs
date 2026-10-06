@@ -913,8 +913,10 @@ async function runProbe(page, platform, { puzzleId, cells, out, check }) {
 async function runEdge(page, platform, { out, check, base }) {
   const catalogue = await page.evaluate(CATALOGUE);
   const target = catalogue[1]; // level 1, puzzle 2 — small board, always unlocked
+  // Observations that are not pass/fail. Empty right now: the one note this used to
+  // carry (stroke-undo unreachable) became a real assertion at E6 once DOO-16 wired the
+  // caller up. Kept because the edge JSON's shape is part of the report's inputs.
   const notes = [];
-  const record = (name, detail) => notes.push({ name, detail });
 
   // --- E1 partial progress survives a reload, MARKED cells included -----------
   await openPuzzle(page, target);
@@ -998,17 +1000,74 @@ async function runEdge(page, platform, { out, check, base }) {
   const afterOverUndo = await page.evaluate('Array.from(window.__nonogram.session().state).join("")');
   check('edge: undo past the start of the stack is a no-op', /^0+$/.test(afterOverUndo), afterOverUndo);
 
-  // --- E6 the stroke-undo API is not reachable from the UI ---------------------
-  // state/session.js ships beginStroke/endStroke and 19 tests for grouped undo, which
-  // its header describes as the fix for a drag that paints several cells. No file
-  // outside the session and its tests calls either one, and main.js treats any pointer
-  // movement past 5px as a camera rotate — so there is no drag-paint to group.
-  const strokeWired = await page.evaluate(`(() => {
-    const s = window.__nonogram.session();
-    return typeof s.beginStroke === 'function' && typeof s.endStroke === 'function';
-  })()`);
-  record('stroke-undo API present but unreachable from the UI',
-    `session.beginStroke/endStroke exist=${strokeWired}; no caller in main.js/ui/fx/render; a >5px drag rotates the camera`);
+  // --- E6 drag painting, and one undo for the whole stroke (DOO-10 + DOO-16) ---
+  // This slot used to just assert beginStroke/endStroke *existed* and then print a note
+  // saying nothing called them. That was true when it was written and stopped being true
+  // at DOO-16, which restored ui/gestures.js — but the note was a hardcoded string, so
+  // it kept printing a defect that no longer existed. A release report that cries wolf
+  // is worse than one that stays quiet, so it now drives the feature instead.
+  //
+  // Two things have to hold for DOO-10's grouped undo to mean anything to a player:
+  // a drag must paint more than one cell, and ONE undo press must take the whole drag
+  // back. Both are driven the way a player does it — `#btn-mode` for paint mode (the
+  // `__nonogram.mode()` handle is read-only on purpose) and real CDP input for the drag.
+  await openPuzzle(page, target);
+  const paintRect = await page.evaluate('JSON.stringify(window.__qa.rect())').then(JSON.parse);
+  const modeBefore = await page.evaluate('window.__nonogram.mode()');
+  await page.evaluate("document.getElementById('btn-mode').click()");
+  await sleep(150);
+  const modeAfter = await page.evaluate('window.__nonogram.mode()');
+
+  // A horizontal sweep through the middle of the board, which crosses several columns of
+  // the front face at any camera angle. Stepping in 6px increments keeps every move
+  // inside one cell's width so no crossing is skipped.
+  const dragY = Math.round(paintRect.top + paintRect.height / 2);
+  const dragX0 = Math.round(paintRect.left + paintRect.width * 0.35);
+  const dragX1 = Math.round(paintRect.left + paintRect.width * 0.65);
+  const touch = platform.touch;
+  const pt = (x) => [{ x, y: dragY, radiusX: 8, radiusY: 8, force: 1, id: 1 }];
+  if (touch) {
+    await page.call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: pt(dragX0) });
+  } else {
+    await page.call('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: dragX0, y: dragY, button: 'left', clickCount: 1, buttons: 1, pointerType: 'mouse',
+    });
+  }
+  for (let x = dragX0 + 6; x <= dragX1; x += 6) {
+    if (touch) await page.call('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: pt(x) });
+    else {
+      await page.call('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x, y: dragY, button: 'left', buttons: 1, pointerType: 'mouse',
+      });
+    }
+  }
+  if (touch) await page.call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  else {
+    await page.call('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: dragX1, y: dragY, button: 'left', clickCount: 1, buttons: 0, pointerType: 'mouse',
+    });
+  }
+  await sleep(200);
+
+  const painted = await page
+    .evaluate('JSON.stringify(window.__qa.board().map((v, i) => [i, v]).filter(([, v]) => v !== 0))')
+    .then(JSON.parse);
+  // One press, not a loop: the whole point of the stroke group is that a drag costs the
+  // player a single undo. Looping here would pass even with no grouping at all.
+  await page.evaluate("document.getElementById('undo').click()");
+  await sleep(200);
+  const afterStrokeUndo = await page.evaluate('Array.from(window.__nonogram.session().state).join("")');
+
+  check('edge: a drag paints a stroke of several cells (DOO-16 restored the caller)',
+    modeAfter === 'paint' && painted.length >= 2,
+    `#btn-mode: ${modeBefore} -> ${modeAfter}; drag ${dragX0}->${dragX1}px painted ${painted.length} cells ` +
+    `[${painted.map(([i]) => i).join(',')}]`);
+  check('edge: one undo press takes the entire painted stroke back (DOO-10 grouping)',
+    painted.length >= 2 && /^0+$/.test(afterStrokeUndo),
+    `${painted.length} cells painted -> after ONE undo: ${afterStrokeUndo}`);
+
+  // Leave the board in rotate mode so nothing after this inherits paint mode.
+  if (modeAfter === 'paint') await page.evaluate("document.getElementById('btn-mode').click()");
 
   // --- E7 a hint costs points and the board stays consistent ------------------
   await openPuzzle(page, target);
