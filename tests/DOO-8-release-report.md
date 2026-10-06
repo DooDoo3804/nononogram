@@ -3936,3 +3936,66 @@ const wanted = group.cells.filter(({ cell }) => board[cell] !== 1);
 7행 중 5행이 예측대로 움직였고 2행은 원래 깨끗해 그대로다. `camera-edit FAIL` 0건.
 **그러나 7/48은 판정이 아니다.** 남은 41행, 특히 예측 4의 `l2-ladder`(바로 다음 퍼즐)와
 실패 3건이 나오기 전까지 §28의 **차단 판정을 유지한다.**
+
+---
+
+## 31. 배포 가능성 감사 — 퍼즐 수와 **무관하게** 남는 차단 사유 1건
+
+합격선에는 "배포 가능한 정적 산출물"이 있다. §28.6이 "`master`에는 게임이 없다"고
+적었지만 **그게 얼마나 심각한지, 고치기 어려운지는 적지 않았다.** git으로 확정했다
+(브라우저 불필요 — 재측정 레일과 CPU를 다투지 않는다, §17.6).
+
+### 31.1 브랜치 10개 전수 — 무엇이 HEAD에 없는가
+
+| 브랜치 | HEAD에 없는 커밋 | HEAD보다 뒤 |
+|---|---|---|
+| `master` | **0** | **83** |
+| `t-foundation` `t-render` `t-render-aim` `t-rewards` `t-solver` `t-ui-viewport` | **0** | 50~82 |
+| `t-ui` | **1** | 82 |
+| `t-ui-stroke-undo` | **3** | 82 |
+| `t-ui-peel` (= HEAD, 판정 대상) | — | — |
+
+### 31.2 좋은 소식 — `master` → `t-ui-peel`은 **fast-forward**다
+
+```
+git merge-base --is-ancestor master HEAD  →  true
+master: ahead=0 behind=83,  추적 파일 5개 vs HEAD 95개
+```
+
+`master`는 HEAD의 **진부분집합**이다. 충돌을 푸는 머지가 아니라 **포인터 이동**이다.
+8개 브랜치(10개 중)가 HEAD에 완전히 포함돼 있어 **버려지는 작업이 없다.**
+
+| | |
+|---|---|
+| **재현 절차** | `git merge-base --is-ancestor master HEAD; git ls-tree -r --name-only master \| wc -l` |
+| **기대** | 배포 브랜치(`master`)에 플레이 가능한 게임이 있다 |
+| **실제** | `master` = 5개 파일(`index.html` `main.js` `package.json` `puzzle.js` `style.css`), 초기 999줄 스텁. **지금 `master`를 배포하면 게임이 아니라 스텁이 나간다** |
+| **증거** | 위 명령 출력. 단, **fast-forward 가능** — 해제 비용은 머지 1회 |
+
+> **이것은 QA가 고칠 수 없다** (프로덕션 코드·브랜치 경계 밖). **Angerl 결정 사항**이고,
+> 비용은 낮다. 퍼즐 24/24가 나오더라도 **이 머지 전에는 "배포 가능"이 아니다.**
+
+### 31.3 `t-ui-stroke-undo`의 3커밋 — 접근성 공백의 **정확한** 내용
+
+§28.5의 단서 3을 수치로 좁혔다. `t-ui-stroke-undo`가 유일하게 갖고 있는 것:
+
+| 파일 | HEAD에 | 내용 |
+|---|---|---|
+| `ui/keyboard.js` (162줄) | **없음** | 셀 단위 키보드 내비게이션 |
+| `ui/cursor3d.js` (56줄) | **없음** | 그 내비게이션의 3D 커서 |
+| `ui/gestures.js` | **있음** (275줄, 더 최신) | 머지 불필요 |
+| `tests/gestures-stroke.test.js` `tests/session-stroke.test.js` | **있음** | 머지 불필요 |
+
+**정정 — §28.5 단서 3을 과장했다.** "접근성 산출물 누락"은 HEAD에 접근성이 **없다**는
+뜻으로 읽힌다. 실제로는 부분적으로 있다:
+
+```
+keydown 핸들러 4곳: render/peel.js(레이어 필) · ui/clues.js(클루 탭)
+                   · ui/gestures.js(수식 키) · ui/peel.js
+aria-/tabindex 37개: index.html 17 · fx/chrome.js 5 · ui/clues.js 4 · ui/peel.js 4 · 그 외 4파일
+dangling import: 0건 (빌드가 깨지지 않는 이유)
+```
+
+**정확한 공백** — 레이어 필·클루 탭·수식 키는 키보드로 되고, **격자 셀을 키보드만으로
+이동하며 채우는 것은 안 된다.** 그 모듈(162줄)은 **만들어졌지만 머지되지 않았다.**
+합격선이 요구하는 항목은 아니다(요구는 마우스·터치 1급). DOO-25 몫으로 남긴다.
