@@ -1,5 +1,8 @@
-// puzzle.js — pure nonogram-3d logic, no DOM. Run with `node puzzle.js` to self-check.
+// puzzle.js — pure nonogram-3d logic, no DOM.
 // dims = { x, y, z } — a box, not necessarily a cube.
+//
+// The self-check that used to run via `node puzzle.js` now lives in
+// tests/puzzle.test.js — run it with `npm test`.
 
 export const idx = (dims, x, y, z) => (x * dims.y + y) * dims.z + z;
 
@@ -65,35 +68,9 @@ export function isSolved(cells, solution) {
   return true;
 }
 
-function sumClues(grid) {
+/** Total filled cells accounted for by one axis' clue grid. */
+export function sumClues(grid) {
   let total = 0;
   for (const row of grid) for (const runs of row) total += runs.reduce((a, b) => a + b, 0);
   return total;
 }
-
-function demo() {
-  const dims = { x: 2, y: 3, z: 2 }; // deliberately non-cubic
-  const solution = generateSolution(dims, 0.5);
-  const filledCount = solution.reduce((a, b) => a + b, 0);
-  const clues = computeClues(dims, solution);
-
-  console.assert(sumClues(clues.x) === filledCount, 'x-clues must account for every filled cell');
-  console.assert(sumClues(clues.y) === filledCount, 'y-clues must account for every filled cell');
-  console.assert(sumClues(clues.z) === filledCount, 'z-clues must account for every filled cell');
-  console.assert(clues.x.length === dims.y && clues.x[0].length === dims.z, 'x-clue grid shape matches (y,z)');
-  console.assert(clues.y.length === dims.x && clues.y[0].length === dims.z, 'y-clue grid shape matches (x,z)');
-  console.assert(clues.z.length === dims.x && clues.z[0].length === dims.y, 'z-clue grid shape matches (x,y)');
-  console.assert(isSolved(solution, solution), 'identical grids must be solved');
-
-  const mutated = solution.slice();
-  mutated[0] ^= 1;
-  console.assert(!isSolved(mutated, solution), 'a single differing cell must fail isSolved');
-
-  const seeded1 = generateSolution(dims, 0.5, mulberry32(42));
-  const seeded2 = generateSolution(dims, 0.5, mulberry32(42));
-  console.assert(isSolved(seeded1, seeded2), 'same seed must reproduce the same solution');
-
-  console.log('puzzle.js self-check passed');
-}
-
-if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWith('puzzle.js')) demo();
