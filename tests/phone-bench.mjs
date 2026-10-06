@@ -42,9 +42,9 @@ import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
-import { execFileSync } from 'node:child_process';
 import { extname, join, normalize, resolve } from 'node:path';
 import { phonePageHtml } from './phone-page.mjs';
+import { gitCommit } from './phone-commit.mjs';
 import { buildRecord, reportMarkdown, P95_CEILING_MS } from './phone-verdict.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -65,17 +65,7 @@ const SWEEP_CAPS = (process.env.BENCH_SWEEP_CAPS ?? '1,1.5,2')
 const SWEEP_SECONDS = Number(process.env.BENCH_SWEEP_SECONDS ?? 1);
 const SWEEP_SYNC_SAMPLES = Number(process.env.BENCH_SWEEP_SYNC ?? 32);
 
-// Which build the reading belongs to. A perf number with no commit attached cannot be
-// re-read later, and this tree has several branches in flight at once.
-const COMMIT = (() => {
-  try {
-    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT }).toString().trim();
-    const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: ROOT }).toString().trim();
-    return dirty ? `${sha}+dirty` : sha;
-  } catch {
-    return null;
-  }
-})();
+const COMMIT = gitCommit();
 
 // Served to the phone out of this directory so the LAN route and the static route run
 // byte-identical code. `.mjs` keeps its own MIME entry above.

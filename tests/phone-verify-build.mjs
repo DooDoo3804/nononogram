@@ -18,9 +18,9 @@
 
 import { readFile, writeFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { join, resolve, relative } from 'node:path';
 import { phonePageHtml } from './phone-page.mjs';
+import { gitCommit } from './phone-commit.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const DIST = join(ROOT, 'dist');
@@ -30,19 +30,6 @@ const pruneMaps = process.argv.includes('--prune-maps');
 if (!existsSync(join(DIST, 'bench', 'index.html'))) {
   console.error('dist/bench/index.html is missing — run `npm run build` first.');
   process.exit(1);
-}
-
-// The artifact outlives the tree it came from, and a perf number that cannot be tied to
-// a commit cannot be re-read later. `git describe` is not used: this needs the exact
-// object, and tags are not part of this project's flow.
-function commit() {
-  try {
-    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT }).toString().trim();
-    const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: ROOT }).toString().trim();
-    return dirty ? `${sha}+dirty` : sha;
-  } catch {
-    return null;
-  }
 }
 
 async function walk(dir) {
@@ -57,7 +44,7 @@ async function walk(dir) {
 
 await mkdir(OUT, { recursive: true });
 
-const sha = commit();
+const sha = gitCommit(ROOT);
 const builtAt = new Date().toISOString();
 
 // Served from dist/verify/, so the bench page is one level up. The game's own build is
