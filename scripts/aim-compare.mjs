@@ -85,7 +85,10 @@ for (const k of keys) {
   }
 }
 
-console.log(`\n=== box level — every cell of the box, best angle of the 35-step sweep (${platform}) ===\n`);
+// `pixelByCell`/`cheapestCost` are the camera-only half of the sweep (`reach` keeps the
+// depth-cursor band in a separate `cursor` block for exactly this reason), so these rows
+// compare like with like across runs taken before and after the cursor shipped.
+console.log(`\n=== box level — every cell of the box, best angle of the camera sweep (${platform}) ===\n`);
 console.log('dims     cells  reached        cost0        aperture min      median        <24px        <44px');
 for (const k of keys) {
   const b = before[k];
@@ -103,11 +106,13 @@ for (const k of keys) {
     b.aperture.underMouse24 === a.aperture.underMouse24;
   console.log(`         ${same ? 'identical on the counts that gate' : 'CHANGED'}`);
 
-  // Run-to-run noise, measured rather than assumed. Each sweep step rasters the board
-  // 420ms after its camera move, and damping settles in frames — so a machine under
-  // load can raster a camera that has not finished moving. If the two runs disagree
-  // step by step on how many cells the raster found, that is the floor under every
-  // other number here, and it belongs next to them.
+  // Run-to-run noise, measured rather than assumed. This used to be the floor under
+  // every other number here: a sweep step rastered 420ms after its camera move, damping
+  // settles in frames rather than time, and a loaded machine therefore rastered a camera
+  // that had not finished moving — 19 of 32 steps disagreed between two runs of the same
+  // build, by up to 29 cells (DOO-31). The harness now waits for the camera to converge
+  // and counts in frames, so this line is a regression guard rather than a caveat. It
+  // stays printed: "the two runs agree" is only worth anything if it is measured.
   const bs = new Map(b.perStep.map((s) => [s.name, s]));
   const diffs = a.perStep
     .map((s) => ({ name: s.name, delta: s.cells - (bs.get(s.name)?.cells ?? s.cells) }))

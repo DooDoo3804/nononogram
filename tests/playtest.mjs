@@ -43,7 +43,63 @@
 //     for the playthroughs and for a routing spot-check at every orientation. These go
 //     through Chrome's hit-testing, so an element covering the canvas shows up here.
 //
-// A cell is only ever reported reachable if a real event has landed on it.
+// This file used to declare "a cell is only ever reported reachable if a real event has
+// landed on it". That was never what the code did — `reach` confirms a *sample* (one cell
+// per cost band, plus the tightest aperture it found, plus the tightest the depth cursor
+// found) and the map keeps every cell either way. DOO-31 called that out, so the claim is
+// now the narrower true one: **the reach map is synthetic, and a sample of it is
+// re-checked with a real event at the camera that produced it.** Every confirmation is
+// recorded with its outcome, the summary prints `confirmed N/M`, and a confirmation
+// failure is a failed check rather than a line in a JSON file nobody opens.
+//
+// ## Why every wait in here is counted in frames (DOO-31)
+//
+// OrbitControls with `enableDamping` does not integrate over time. `update()` applies
+// `sphericalDelta * dampingFactor` and then multiplies the delta by `1 - dampingFactor`,
+// with no `dt` anywhere in either line, and `render/scene.js` calls `update()` exactly
+// once per rAF tick. So the camera after a drag is a pure function of the dispatched
+// events and **the number of frames that have run since** — nothing else. At the shipped
+// 0.05 damping a drag is 0.95^n of the way from done after n frames:
+//
+//   n = 25 frames (the old `sleep(420)` at 60fps)   28% of the drag still unapplied
+//   n = 60                                           4.6%
+//   n = 120                                          0.2%
+//
+// A 2*pi/8 drag on a 1280x860 desktop moves the board's silhouette a few hundred px, so
+// "28% unapplied" is tens of pixels of camera — which is why the same build rastered
+// 37 cells under 24x24 one run and 22 the next: a busy machine fitted fewer frames into
+// those 420ms and the raster ran at a different camera. The spread was not noise in the
+// measurement, it was the measurement running before the thing it measures stopped.
+//
+// Everything therefore waits on frames, and `settle()` goes one better: it polls a
+// camera-derived observable every few frames and only returns when the per-frame movement
+// is under `epsPx`. Because the frame sequence is deterministic, two runs of the same
+// build stop on the same frame at the same camera. A step that does not converge inside
+// `maxFrames` is written to `perStep` with `settled: false` and its raster is dropped
+// from the maps — an unsettled step is an unknown, and an unknown must not be averaged
+// into a release verdict.
+//
+// The observable is the sub-pixel position of two footprint edges, bisected through the
+// production pick path (see `feature()`). It is not a second copy of the projection: it
+// is the same raycast the player's clicks go through, asked where a cell ends.
+//
+// What this gets to, measured on two runs of the same build taken *concurrently* on one
+// machine — the contention the bug report blamed, imposed on purpose:
+//
+//                                      before (DOO-31's table)   after
+//   6³ cells reached                   210 vs 213                206 vs 206
+//   cells under 24x24                   37 vs  22                 42 vs  42
+//   l4-cat required cells not reached    6 vs   3 (disjoint sets)   9 vs   9 (same set)
+//   cells crossing 576px² in one run     18                         0
+//   sweep steps whose raster differed    19 of 32 (max 29 cells)    3 of 42 (max 1 cell)
+//
+// The residual is 10 of 206 cells whose aperture differs by one raster sample — 100 px²
+// on cells measuring 3,000 to 90,000 — and it moves no number any verdict reads. Its
+// cause is known and is a floor, not a bug: `settle` stops at 0.03 px/frame, which
+// leaves about 0.6 px of asymptotic camera motion still to come, and how many frames of
+// *that* elapse before the next act depends on CDP round-trip timing. Driving `epsPx`
+// lower trades frames for it; 0.03 is where the measurement resolution (0.004 px) still
+// has a comfortable margin.
 //
 // One production-adjacent stub, disclosed because it is a stub: OrbitControls calls
 // `setPointerCapture(event.pointerId)` on pointerdown, which throws for a synthetic
@@ -110,12 +166,304 @@ const PROBE = `(() => {
     return hits.length ? hits[0] : null;
   }
 
+  /**
+   * One synthetic tap that puts the cell it touched straight back.
+   *
+   * \`before\` is the board as it was, so this is usable mid-playthrough and not only on
+   * a blank board. Fractional pixels are deliberate: CSSOM View types
+   * \`MouseEventInit.clientX\` as a double, \`view.rayFrom\` divides it by the canvas rect,
+   * and the bisection below needs that to resolve a boundary to a fraction of a pixel.
+   * \`subPixel()\` asserts the browser really kept the fraction.
+   */
+  function peek(px, py, before) {
+    const i = tap(px, py);
+    if (i !== null) session().set(i, before[i]);
+    return i;
+  }
+
+  // --- the three camera gestures ---------------------------------------------
+  // Closures rather than methods on the returned object, so \`act()\` can dispatch one
+  // and start settling it without a round trip in between — see \`act()\`. The object
+  // still exposes all three under their old names for the callers that drive them on
+  // their own.
+
+  function orbitBy(dx, dy, steps = 6) {
+    const r = canvas.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    fire('pointerdown', cx, cy, { button: 0, buttons: 1 });
+    for (let n = 1; n <= steps; n++) {
+      fire('pointermove', cx + (dx * n) / steps, cy + (dy * n) / steps, { button: -1, buttons: 1 });
+    }
+    fire('pointerup', cx + dx, cy + dy, { button: 0, buttons: 0 });
+    return true;
+  }
+
+  function panBy(dx, dy, steps = 5) {
+    const r = canvas.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    fire('pointerdown', cx, cy, { button: 2, buttons: 2 });
+    for (let n = 1; n <= steps; n++)
+      fire('pointermove', cx + (dx * n) / steps, cy + (dy * n) / steps, { button: -1, buttons: 2 });
+    fire('pointerup', cx + dx, cy + dy, { button: 2, buttons: 0 });
+    return true;
+  }
+
+  function zoomBy(deltaY, ticks = 1) {
+    const r = canvas.getBoundingClientRect();
+    for (let n = 0; n < ticks; n++) {
+      canvas.dispatchEvent(new WheelEvent('wheel', {
+        deltaY, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+        bubbles: true, cancelable: true,
+      }));
+    }
+    return true;
+  }
+
+  /** Resolve after exactly \`n\` animation frames have run. */
+  function waitFrames(n) {
+    return new Promise((resolve) => {
+      let left = Math.max(1, Math.trunc(n) || 1);
+      const tick = () => (--left <= 0 ? resolve(true) : requestAnimationFrame(tick));
+      requestAnimationFrame(tick);
+    });
+  }
+
+  /**
+   * Sub-pixel position of the first cell boundary going (dx, dy) from the canvas centre.
+   *
+   * Walk out from the centre in \`coarse\` steps until the picked cell stops being the one
+   * under the centre, then bisect that bracket \`iters\` times. The result is a continuous
+   * function of the camera — it moves when the camera moves and holds still when it does
+   * not — measured entirely through the production pick path.
+   *
+   * Why a cell boundary and not the board's silhouette edge: the silhouette disappears
+   * once the camera is dollied inside the box (the board fills the canvas and there is no
+   * outside to bracket against), and the cost-3 sweep steps are exactly the ones that put
+   * it there. Two adjacent cells, on the other hand, meet somewhere near the middle of
+   * the screen at every camera in the plan.
+   *
+   * -> { t, key } | null   \`key\` is the pair of cells that meet here: if the camera turns
+   * far enough that a different pair is at the centre, \`t\` is not comparable with the
+   * previous reading, and the caller uses \`key\` to notice instead of averaging across it.
+   */
+  /**
+   * A pixel that is on the board right now.
+   *
+   * Scattered points rather than a walk out from the canvas centre, because at a
+   * lattice-aligned camera there is no cell under the centre *and no cell anywhere along
+   * the centre lines*. render/voxels.js draws 0.9-unit cubes on a 1.15 pitch, so a fifth
+   * of every pitch is empty space; line the camera up with an axis and those gaps become
+   * straight tunnels through the whole box. Worse, a fixed-stride walk down one stays in
+   * phase with the on-screen pitch and misses every cell for the length of the canvas —
+   * which is why a 24 px walk came back empty at 16 of 42 sweep steps while the raster at
+   * the same camera was landing 2,500 taps on cells. The fractions are irregular and
+   * clustered where the board is.
+   */
+  function anchor(before) {
+    const r = canvas.getBoundingClientRect();
+    const fr = [0.5, 0.43, 0.57, 0.36, 0.64, 0.29, 0.71];
+    for (const fy of fr) {
+      for (const fx of fr) {
+        const px = r.left + r.width * fx;
+        const py = r.top + r.height * fy;
+        if (peek(px, py, before) !== null) return [px, py];
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Sub-pixel edge of the footprint of the cell under \`from\`, walking (dx, dy).
+   *
+   * The walk starts fine and doubles, so a cell drawn 40 px across and one drawn 400 px
+   * across both cost about ten samples; the bisection then resolves the bracket to
+   * thousandths of a pixel. The board's own silhouette counts as an edge (\`b\` is null),
+   * which is what keeps this answerable when one cell fills the view.
+   */
+  function boundary(from, dx, dy, before, iters = 13) {
+    const r = canvas.getBoundingClientRect();
+    const at = (t) => peek(from[0] + dx * t, from[1] + dy * t, before);
+    const inside = (t) => {
+      const px = from[0] + dx * t;
+      const py = from[1] + dy * t;
+      return px >= r.left && py >= r.top && px <= r.left + r.width && py <= r.top + r.height;
+    };
+    const a = at(0);
+    if (a === null) return null;
+
+    let lo = 0;
+    let hi = -1;
+    let b = null;
+    let stride = 4;
+    for (let t = stride; inside(t); t += stride, stride = Math.min(stride * 2, 32)) {
+      const v = at(t);
+      if (v === a) { lo = t; continue; }
+      hi = t; b = v; break;
+    }
+    if (hi < 0) return null;
+    for (let k = 0; k < iters; k++) {
+      const mid = (lo + hi) / 2;
+      if (at(mid) === a) lo = mid; else hi = mid;
+    }
+    // Plain concatenation, not a template literal: this whole probe is itself a template
+    // literal on the Node side, and a nested one would interpolate there instead of here.
+    return { t: (lo + hi) / 2, key: a + '>' + (b === null ? 'out' : b) };
+  }
+
+  /**
+   * The camera's observable: two footprint edges, to thousandths of a pixel.
+   *
+   * \`hint\` is the anchor a previous probe used. Re-using it is what makes consecutive
+   * readings comparable — and it is re-validated first, so an anchor the camera has
+   * moved off is replaced rather than silently measured from.
+   *
+   * -> { t: [...], key, anchor } | null
+   */
+  function feature(hint) {
+    const before = Array.from(session().state);
+    let from = null;
+    if (hint && peek(hint[0], hint[1], before) !== null) from = hint;
+    else from = anchor(before);
+    if (!from) return null;
+
+    const got = [];
+    for (const d of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+      const edge = boundary(from, d[0], d[1], before);
+      if (edge) got.push({ d, t: edge.t, key: edge.key });
+      if (got.length >= 2) break;
+    }
+    if (!got.length) return null;
+    return {
+      t: got.map((g) => g.t),
+      key: got.map((g) => g.d[0] + ',' + g.d[1] + ':' + g.key).join('|'),
+      anchor: from,
+    };
+  }
+
   return {
     install() { listen(); return true; },
 
     rect() {
       const r = canvas.getBoundingClientRect();
       return { left: r.left, top: r.top, width: r.width, height: r.height };
+    },
+
+    frames: waitFrames,
+    feature,
+
+    /**
+     * Dispatch one camera act and settle it, in a single page call.
+     *
+     * Two round trips (dispatch, then settle) leave a gap no harness controls: the rAF
+     * loop keeps running between them, so one run starts settling two frames into the
+     * damping and the next starts one frame in, and the two land on cameras that differ
+     * by the residual at that offset. Sub-pixel, but it was still enough to move a
+     * raster sample at a cell edge on 8 of 42 steps. Doing both inside one call removes
+     * the gap entirely: \`feature()\` here runs in the same synchronous block as the
+     * dispatch, so \`before\` is exactly the camera at rest, and frame 1 of the settle is
+     * exactly the first frame of the act.
+     *
+     * -> { before, ...settle() }
+     */
+    async act(spec, opts) {
+      const r = canvas.getBoundingClientRect();
+      const before = (opts && opts.probe === false) ? null : feature();
+      if (spec.kind === 'orbit') orbitBy(spec.dx * r.height, spec.dy * r.height, 8);
+      else if (spec.kind === 'zoom') zoomBy(-120, spec.ticks);
+      else if (spec.kind === 'pan') panBy(spec.dx * r.width, spec.dy * r.height, 5);
+      return { before, ...(await this.settle(opts)) };
+    },
+
+    /** The depth cursor, straight off the shipped read-only handle. */
+    peelState() { return window.__nonogram.peel(); },
+
+    /** Is the one-time depth-cursor lesson (ui/peel.js) currently over the board? */
+    coachOpen() {
+      const el = document.getElementById('peel-coach');
+      return !!el && !el.hidden;
+    },
+
+    /**
+     * Wait until the camera has stopped moving, and report in frames what happened.
+     *
+     * See the header for why frames are the clock. Two halves:
+     *
+     *   the frames themselves  which is what makes the final camera reproducible — the
+     *     damping sequence is identical across runs, so stopping on frame n always stops
+     *     at the same camera however loaded the machine was.
+     *   the \`feature()\` poll  which is what makes "it has stopped" a measurement instead
+     *     of a hope. Per-frame movement under \`epsPx\` for \`stable\` consecutive probes.
+     *
+     * Movement is reported per frame rather than per probe so the threshold means the
+     * same thing whatever \`probeEvery\` is. Because the decay is geometric at 0.05, the
+     * motion still to come when a probe reads \`d\` px/frame is about \`19 * d\` px — so
+     * \`epsPx\` of 0.03 leaves well under a pixel of camera on the table.
+     *
+     * \`probe: false\` takes the frame count and skips the poll. \`play\` needs that: a probe
+     * is a synthetic tap, and a tap on a board one cell from complete would latch
+     * \`solved\` inside the session — which would hand a playthrough its clear from the
+     * harness instead of from a real tap. The reproducible half still applies.
+     *
+     * -> { settled, probed, frames, perFramePx, at, trace, blind, reason }
+     */
+    async settle(opts) {
+      const o = {
+        minFrames: 12, maxFrames: 480, probeEvery: 8, epsPx: 0.03, stable: 2,
+        probe: true, fixedFrames: 150, ...(opts || {}),
+      };
+      const s = session();
+      const blank = !s.solved && Array.prototype.every.call(s.state, (v) => v === 0);
+      if (!o.probe || !blank) {
+        await waitFrames(o.fixedFrames);
+        return {
+          settled: null, probed: false, frames: o.fixedFrames,
+          reason: o.probe ? 'board not blank — probing could latch solved' : 'probe disabled',
+        };
+      }
+
+      let prev = feature();
+      let hint = prev ? prev.anchor : null;
+      let run = 0;
+      let frames = 0;
+      let perFramePx = null;
+      let blind = 0;
+      const trace = [];
+      while (frames < o.maxFrames) {
+        const n = Math.min(o.probeEvery, o.maxFrames - frames);
+        await waitFrames(n);
+        frames += n;
+        const now = feature(hint);
+        // Not one of the scattered anchor points landed on the board — nothing to
+        // measure, so nothing can be claimed. The next probe searches again from
+        // scratch. Counted, because a camera that stays unmeasurable is a failed settle
+        // and not a settled one.
+        if (!now) {
+          blind++;
+          prev = null;
+          hint = null;
+          run = 0;
+          continue;
+        }
+        hint = now.anchor;
+        if (prev && prev.key === now.key && prev.t.length === now.t.length) {
+          perFramePx = Math.max(...now.t.map((v, i) => Math.abs(v - prev.t[i]))) / n;
+          trace.push(Number(perFramePx.toFixed(4)));
+          if (frames >= o.minFrames && perFramePx <= o.epsPx) {
+            if (++run >= o.stable) {
+              return { settled: true, probed: true, frames, perFramePx, at: now, trace, blind };
+            }
+          } else run = 0;
+        } else run = 0;
+        prev = now;
+      }
+      return {
+        settled: false, probed: true, frames, perFramePx, trace, blind, at: prev,
+        reason: blind
+          ? 'no cell boundary near the canvas centre on ' + blind + ' of the probes'
+          : 'still moving after ' + o.maxFrames + ' frames',
+        key: prev ? prev.key : null,
+      };
     },
 
     /**
@@ -225,17 +573,7 @@ const PROBE = `(() => {
     },
 
     /** Rotate via OrbitControls' own drag path. dx/dy in px. */
-    orbit(dx, dy, steps = 6) {
-      const r = canvas.getBoundingClientRect();
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
-      fire('pointerdown', cx, cy, { button: 0, buttons: 1 });
-      for (let n = 1; n <= steps; n++) {
-        fire('pointermove', cx + (dx * n) / steps, cy + (dy * n) / steps, { button: -1, buttons: 1 });
-      }
-      fire('pointerup', cx + dx, cy + dy, { button: 0, buttons: 0 });
-      return true;
-    },
+    orbit: orbitBy,
 
     /**
      * Pan via a right-button drag — OrbitControls' default RIGHT binding, and the
@@ -243,15 +581,7 @@ const PROBE = `(() => {
      * swinging around it. Deep inside the box, pan is the only way to get next to a
      * particular cell: orbit and dolly both aim at the centre.
      */
-    pan(dx, dy, steps = 5) {
-      const r = canvas.getBoundingClientRect();
-      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-      fire('pointerdown', cx, cy, { button: 2, buttons: 2 });
-      for (let n = 1; n <= steps; n++)
-        fire('pointermove', cx + (dx * n) / steps, cy + (dy * n) / steps, { button: -1, buttons: 2 });
-      fire('pointerup', cx + dx, cy + dy, { button: 2, buttons: 0 });
-      return true;
-    },
+    pan: panBy,
 
     /**
      * Raster a small window centred on the canvas and report which of \`targets\` it hit.
@@ -278,16 +608,7 @@ const PROBE = `(() => {
     },
 
     /** Dolly via the wheel, the same affordance a mouse user has. */
-    zoom(deltaY, ticks = 1) {
-      const r = canvas.getBoundingClientRect();
-      for (let n = 0; n < ticks; n++) {
-        canvas.dispatchEvent(new WheelEvent('wheel', {
-          deltaY, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
-          bubbles: true, cancelable: true,
-        }));
-      }
-      return true;
-    },
+    zoom: zoomBy,
 
     /**
      * Re-find the pixel that reaches \`cell\` right now, searching outward from a hint.
@@ -398,7 +719,7 @@ const CATALOGUE = `(() => {
  * Clicks the DOM the way a player does rather than calling openPuzzle directly, so a
  * card that is locked or missing fails here instead of being skipped.
  */
-async function openPuzzle(page, { levelIndex, puzzleIndex, id }, { fresh = true } = {}) {
+async function openPuzzle(page, { levelIndex, puzzleIndex, id }, { fresh = true, frames = 48 } = {}) {
   await page.evaluate(`(() => {
     ${fresh ? `localStorage.removeItem('no-nonogram:' + ${JSON.stringify(id)});` : ''}
     const show = (sel, i) => {
@@ -414,9 +735,23 @@ async function openPuzzle(page, { levelIndex, puzzleIndex, id }, { fresh = true 
     `(() => { const s = window.__nonogram.session(); return !!s && s.spec.id === ${JSON.stringify(id)}; })()`,
     { timeoutMs: 15_000 },
   );
-  // Let OrbitControls' damping settle so the camera is where frameCamera put it.
-  await sleep(350);
   await installProbe(page);
+  // `frameCamera` writes the camera directly, so the open itself needs no damping — but
+  // whatever drag the *previous* sweep step dispatched is still decaying in
+  // `sphericalDelta`, and `update()` keeps applying it across the re-open. That is a
+  // sweep step inheriting the tail of the one before it, which is the second half of
+  // DOO-31's spread. 48 frames leaves 0.95^48 = 8% of an already-converged residue;
+  // combined with `settle()` ending the previous step under 0.03 px/frame it is
+  // thousandths of a pixel. Counted in frames for the reason in the header.
+  await page.evaluate(`window.__qa.frames(${frames})`);
+  // The one-time depth-cursor lesson (ui/peel.js) is anchored over the board on level 3+
+  // boards, so it is in the way of a real tap aimed at the stepper and of a screenshot.
+  // Dismissed through its own close button. Whether it *steals* a tap is DOO-28's gate
+  // (scripts/probe-peel-ui.mjs asserts it), not a thing to re-measure here.
+  if (await page.evaluate('window.__qa.coachOpen()')) {
+    await page.evaluate("document.getElementById('peel-coach-close').click()");
+    await page.evaluate('window.__qa.frames(3)');
+  }
 }
 
 // --- real input --------------------------------------------------------------
@@ -435,6 +770,66 @@ async function realTap(page, px, py, { touch }) {
       buttons: type === 'mousePressed' ? 1 : 0, pointerType: 'mouse',
     });
   }
+}
+
+/** A real key press through Chrome, so the shipped `[`/`]`/`\` binding is what runs. */
+async function realKey(page, key) {
+  const code = key === ']' ? 'BracketRight' : key === '[' ? 'BracketLeft' : 'Backslash';
+  const vk = key === ']' ? 221 : key === '[' ? 219 : 220;
+  for (const type of ['keyDown', 'keyUp']) {
+    await page.call('Input.dispatchKeyEvent', {
+      type, key, code, text: type === 'keyDown' ? key : undefined,
+      windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
+    });
+  }
+}
+
+/** A real click or tap on the centre of an element, by id, through Chrome's hit-testing. */
+async function tapElement(page, id, platform) {
+  const box = await page
+    .evaluate(`JSON.stringify((() => {
+      const el = document.getElementById(${JSON.stringify(id)});
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, disabled: !!el.disabled, w: r.width, h: r.height };
+    })())`)
+    .then(JSON.parse);
+  if (!box || box.disabled || box.w < 1) return { ok: false, box };
+  await realTap(page, Math.round(box.x), Math.round(box.y), platform);
+  return { ok: true, box };
+}
+
+/**
+ * Drive the depth cursor to `depth` with the affordance this platform actually has.
+ *
+ * Desktop presses the shipped `]` binding as real key events; touch taps `#peel-more`,
+ * DOO-28's on-screen stepper, as a real tap — because a phone has no `]` key and a sweep
+ * that pressed one anyway would be measuring a control the player cannot reach. Both go
+ * through Chrome, and the result is read back off `__nonogram.peel()` (read-only by
+ * design) so a press that did not land fails here instead of silently measuring depth 0.
+ *
+ * `render/peel.js` re-aims at the face the camera is on at the moment of the first press
+ * and starts that face from zero, so this must run *after* the camera has settled — which
+ * is why `applyActs` orders a `peel` act last and settles the orbit before it.
+ *
+ * -> { depth, requested, axis, sign, max, presses, via }
+ */
+async function setPeelDepth(page, platform, depth, { via = platform.touch ? 'button' : 'key' } = {}) {
+  let presses = 0;
+  for (let n = 0; n < depth; n++) {
+    if (via === 'button') {
+      const hit = await tapElement(page, 'peel-more', platform);
+      if (!hit.ok) break;
+    } else {
+      await realKey(page, ']');
+    }
+    presses++;
+    // The grid's layer window is set synchronously, so this is only here to let the
+    // readout and the renderer catch up before anything reads the screen.
+    await page.evaluate('window.__qa.frames(2)');
+  }
+  const st = await page.evaluate('JSON.stringify(window.__qa.peelState())').then(JSON.parse);
+  return { ...st, requested: depth, presses, via };
 }
 
 /**
@@ -483,8 +878,25 @@ async function confirmWithRealTap(page, cell, hint, platform) {
  *   1  orbit only — drag the board around
  *   2  orbit + dolly in, camera still outside the box
  *   3  dolly past the shell, camera inside the box
+ *
+ * `peel` is the second axis, added at DOO-31: how many layers the depth cursor has taken
+ * off the near face. It is deliberately *not* folded into `cost`.
+ *
+ *   The two are different kinds of effort and the numbers already quoted are in terms of
+ *   `cost`. Renumbering the bands to slot the cursor in would make every reach JSON on
+ *   the board incomparable with the next one, and `scripts/aim-compare.mjs` keys on
+ *   `cheapestCost` to diff two runs. So `cost` keeps meaning exactly what it meant —
+ *   camera work, and camera work only — and the camera-only maps are built from the
+ *   `peel: 0` steps alone. The cursor band accumulates into its own map, and the record
+ *   reports both: `reached` is the box with camera work alone, `cursor.reached` is the box
+ *   the shipped game actually gives the player.
+ *
+ * `maxPeel` is read off `__nonogram.peel().max` at the camera the puzzle opens on, so it
+ * is the facing axis's own depth and not an assumption about which axis that is. 0 (the
+ * default) leaves the plan exactly as it was before DOO-31 — that is what `--peel=off`
+ * gets, and what makes a run comparable with one taken before the cursor shipped.
  */
-function sweepPlan() {
+function sweepPlan({ maxPeel = 0 } = {}) {
   const steps = [{ name: 'default', cost: 0, acts: [] }];
 
   // Cost 1 — orbit only. 8 azimuths x 3 elevations. A drag of `clientHeight` px is a
@@ -517,25 +929,104 @@ function sweepPlan() {
       });
     }
   }
+  // The depth cursor (DOO-17/DOO-28). Two cameras, not eight: peeling 1..max off one
+  // face already makes every layer along that axis the exposed front layer at some
+  // depth, so one face is enough for coverage and the opposite face is there for
+  // aperture — a cell seen from the other end of the same axis is a different-sized
+  // target. Everything else the cursor could be combined with is camera work the 35
+  // steps above already price.
+  for (const az of [0, 4]) {
+    for (let depth = 1; depth <= maxPeel; depth++) {
+      steps.push({
+        name: `peel ${depth}${az ? ` az=${az * 45}deg` : ''}`,
+        cost: az ? 1 : 0,
+        peel: depth,
+        acts: [
+          ...(az ? [{ kind: 'orbit', dx: az / 8, dy: 0 }] : []),
+          { kind: 'peel', depth },
+        ],
+      });
+    }
+  }
   return steps;
 }
 
-async function applyActs(page, acts) {
-  const rect = await page.evaluate('JSON.stringify(window.__qa.rect())').then(JSON.parse);
+/**
+ * Perform a step's acts, waiting after each one until the camera has stopped moving.
+ *
+ * Returns one record per act, which is where `perStep.settled` comes from. An act that
+ * came back `settled: false` — or a peel press that did not land — makes the whole step
+ * an unknown, and `runReach` drops that step's raster rather than folding it in.
+ *
+ * `probe: false` is for `play`: see `settle()` for why a playthrough must not run
+ * synthetic taps while it is holding real progress on the board.
+ */
+async function applyActs(page, acts, { platform, probe = true, settle = {} } = {}) {
+  const done = [];
   for (const act of acts) {
-    if (act.kind === 'orbit') {
-      // dx/dy are fractions of a full turn; OrbitControls maps clientHeight px -> 2*pi.
-      await page.evaluate(`window.__qa.orbit(${act.dx * rect.height}, ${act.dy * rect.height}, 8)`);
-    } else if (act.kind === 'zoom') {
-      await page.evaluate(`window.__qa.zoom(-120, ${act.ticks})`);
+    if (act.kind === 'peel') {
+      const got = await setPeelDepth(page, platform, act.depth);
+      done.push({
+        act: `peel ${act.depth}`,
+        settled: got.depth === act.depth,
+        depth: got.depth,
+        requested: act.depth,
+        detail: `${got.via} x${got.presses} -> depth ${got.depth}/${got.max} on ` +
+          `${got.axis}${got.sign < 0 ? '-' : '+'}`,
+      });
+      continue;
     }
-    // Damping needs frames, not time — but frames are time here. 0.05 damping settles
-    // to under a pixel of movement in well under 400ms at 60fps.
-    await sleep(420);
+    // One call dispatches the gesture and settles it — see `act()` for why the round
+    // trip between the two used to matter. `dx`/`dy` are fractions of a full turn;
+    // OrbitControls maps a drag of clientHeight px to 2*pi, and the probe does that
+    // conversion against the live canvas rect.
+    const got = await page
+      .evaluate(`window.__qa.act(${JSON.stringify(act)}, ${JSON.stringify({ probe, ...settle })})`
+        + '.then((r) => JSON.stringify(r))')
+      .then(JSON.parse);
+    const before = got.before;
+    // A zero-magnitude orbit is in the plan on purpose — `zoom 14t + orbit az=0deg` is
+    // the dolly band's straight-on shot — so "the camera did not move" is only a
+    // complaint when the act asked it to. A different `key` before and after is the act
+    // having moved the camera far enough to put a different cell under the anchor, which
+    // is movement by any reading.
+    const asked = act.kind === 'zoom' ? act.ticks > 0 : !!(act.dx || act.dy);
+    const movedPx = before && got.at && before.key === got.at.key && before.t.length === got.at.t.length
+      ? Math.max(...got.at.t.map((v, i) => Math.abs(v - before.t[i])))
+      : null;
+    done.push({
+      act: act.kind === 'zoom' ? `zoom ${act.ticks}t` : `orbit ${act.dx},${act.dy}`,
+      settled: got.settled !== false,
+      probed: got.probed,
+      frames: got.frames,
+      perFramePx: got.perFramePx ?? null,
+      movedPx,
+      took: !asked || !before || !got.at || movedPx === null || movedPx > 0.5,
+      detail: got.reason ?? `${got.frames} frames to ${(got.perFramePx ?? 0).toFixed(4)} px/frame`,
+      // Only on failure, and only then: this is the per-probe movement history, and it is
+      // the whole diagnosis of a step that would otherwise just say "did not converge".
+      ...(got.settled === false ? { trace: got.trace, key: got.key } : {}),
+    });
   }
+  return done;
 }
 
-async function runReach(page, platform, { dimsList, step, out, check }) {
+/** min / median / how many fall under each floor, over a cell -> best-hit map. */
+function apertureOf(best, step) {
+  const rows = [...best.entries()].map(([cell, b]) => ({
+    cell, samples: b.samples, px2: b.samples * step * step, cost: b.cost, peel: b.peel ?? 0,
+  }));
+  const sorted = [...rows].sort((a, b) => a.px2 - b.px2);
+  return {
+    min: sorted[0]?.px2 ?? 0,
+    median: sorted[Math.floor(sorted.length / 2)]?.px2 ?? 0,
+    underMouse24: rows.filter((a) => a.px2 < 576).length,
+    underFinger44: rows.filter((a) => a.px2 < 1936).length,
+    tightest: sorted.slice(0, 12),
+  };
+}
+
+async function runReach(page, platform, { dimsList, step, out, check, peel = true }) {
   const catalogue = await page.evaluate(CATALOGUE);
   const byDims = new Map();
   for (const entry of catalogue) {
@@ -544,7 +1035,6 @@ async function runReach(page, platform, { dimsList, step, out, check }) {
   }
 
   const wanted = dimsList?.length ? dimsList.map(dimsKey) : [...byDims.keys()];
-  const plan = sweepPlan();
   const results = {};
 
   for (const key of wanted) {
@@ -554,6 +1044,12 @@ async function runReach(page, platform, { dimsList, step, out, check }) {
       continue;
     }
     const total = entry.dims.x * entry.dims.y * entry.dims.z;
+    // How deep the cursor goes on this box is the facing axis's own depth, so it is read
+    // off the shipped handle at the camera the puzzle opens on rather than assumed.
+    await openPuzzle(page, entry);
+    const cursor0 = await page.evaluate('JSON.stringify(window.__qa.peelState())').then(JSON.parse);
+    const plan = sweepPlan({ maxPeel: peel ? cursor0.max : 0 });
+
     // cheapest interaction cost at which each cell first became reachable
     const costOf = new Map();
     // cell -> the orientation where its clickable aperture is *largest*. The whole sweep
@@ -561,72 +1057,121 @@ async function runReach(page, platform, { dimsList, step, out, check }) {
     // cell is often the one where it is a 2px sliver; `play` wants the easiest shot, and
     // the verdict wants the aperture of the easiest shot.
     const bestOf = new Map();
+    // The same two, over every step including the depth-cursor band — the box as the
+    // shipped game hands it to the player. Kept apart from the pair above so `cost`,
+    // `cheapestCost` and `pixelByCell` keep meaning what they meant before DOO-31 and
+    // every reach JSON already on the board stays comparable (see `sweepPlan`).
+    const cursorFirst = new Map();
+    const cursorBest = new Map();
     const perStep = [];
     const startedAt = Date.now();
+    let unsettledSteps = 0;
     let box = null;
 
     for (const s of plan) {
       // A fresh open resets the camera, so each sweep step starts from the same place
       // and its `cost` means what it says.
       await openPuzzle(page, entry);
-      await applyActs(page, s.acts);
+      const settles = await applyActs(page, s.acts, { platform });
+      const bad = settles.filter((a) => a.settled === false || a.took === false);
       // The board's screen box changes with the camera, so it is re-found per step.
       box = await page.evaluate('JSON.stringify(window.__qa.bbox(20))').then(JSON.parse);
       const { map, taps, landed, refined } = await page
         .evaluate(`JSON.stringify(window.__qa.raster(${step}, ${JSON.stringify(box)}))`)
         .then(JSON.parse);
 
+      const row = {
+        name: s.name, cost: s.cost, peel: s.peel ?? 0, taps, landed, refined,
+        cells: Object.keys(map).length, fresh: 0, settled: bad.length === 0, settles,
+      };
+
+      // An unsettled step is an unknown, and an unknown must not be folded into a
+      // release verdict (DOO-31). Its raster is still recorded in `perStep` — the
+      // numbers are the diagnosis for *why* it did not converge — but it contributes
+      // no cell to either map.
+      if (!row.settled) {
+        unsettledSteps++;
+        perStep.push(row);
+        console.log(
+          `  ${key}  ${s.name.padEnd(38)} DROPPED — ${bad.map((a) => `${a.act}: ${a.detail}`).join('; ')}`,
+        );
+        continue;
+      }
+
       let fresh = 0;
       let improved = 0;
       for (const [cellStr, hit] of Object.entries(map)) {
         const cell = Number(cellStr);
+        const rec = { px: hit.px, samples: hit.samples, step: s.name, acts: s.acts, cost: s.cost, peel: row.peel };
+        if (!cursorFirst.has(cell)) cursorFirst.set(cell, { cost: s.cost, peel: row.peel });
+        const prevAny = cursorBest.get(cell);
+        if (!prevAny || hit.samples > prevAny.samples) cursorBest.set(cell, rec);
+        if (row.peel) continue;
         if (!costOf.has(cell)) { costOf.set(cell, s.cost); fresh++; }
         const prev = bestOf.get(cell);
         if (!prev || hit.samples > prev.samples) {
-          bestOf.set(cell, { px: hit.px, samples: hit.samples, step: s.name, acts: s.acts, cost: s.cost });
+          bestOf.set(cell, rec);
           if (prev) improved++;
         }
       }
-      perStep.push({ name: s.name, cost: s.cost, taps, landed, refined, cells: Object.keys(map).length, fresh });
-      if (fresh || improved) {
+      row.fresh = fresh;
+      perStep.push(row);
+      if (fresh || improved || row.peel) {
         console.log(
           `  ${key}  ${s.name.padEnd(38)} reached ${String(Object.keys(map).length).padStart(3)}` +
-            `  (+${fresh} new, ${improved} wider, ${costOf.size}/${total})`,
+            `  (+${fresh} new, ${improved} wider, ${costOf.size}/${total} camera, ` +
+            `${cursorBest.size}/${total} with cursor)`,
         );
       }
     }
 
-    // Real-event confirmation: the synthetic map is only admissible for cells a real tap
-    // has also landed on. Sampled across the cost bands plus — deliberately — the cell
-    // with the *smallest* aperture, which is where a real tap is most likely to miss.
+    // Real-event confirmation: a sample of the synthetic map, re-localized and clicked
+    // for real at the camera that produced it. Sampled across the cost bands plus —
+    // deliberately — the tightest aperture in each map, which is where a real event is
+    // most likely to miss. The map keeps every cell either way; what this buys is that
+    // the sample's outcome is a check instead of a footnote, and `confirmed N/M` is
+    // printed next to every number the verdict quotes (DOO-31 §2).
     const sample = [];
+    const add = (cell) => { if (cell !== undefined && !sample.includes(cell)) sample.push(cell); };
     for (const cost of [0, 1, 2, 3]) {
       const cells = [...costOf.entries()].filter(([, c]) => c === cost).map(([cell]) => cell);
-      if (cells.length) sample.push(cells[Math.floor(cells.length / 2)]);
+      if (cells.length) add(cells[Math.floor(cells.length / 2)]);
     }
-    const tightest = [...bestOf.entries()].sort((a, b) => a[1].samples - b[1].samples)[0];
-    if (tightest && !sample.includes(tightest[0])) sample.push(tightest[0]);
+    add([...bestOf.entries()].sort((a, b) => a[1].samples - b[1].samples)[0]?.[0]);
+    // The cursor band's own tightest cell: its `acts` end in a `peel`, so confirming it
+    // presses the shipped `]` / `#peel-more` and proves the whole replay path, cursor
+    // included, lands a real event.
+    add([...cursorBest.entries()].filter(([, b]) => b.peel)
+      .sort((a, b) => a[1].samples - b[1].samples)[0]?.[0]);
+
     const confirmations = [];
     for (const cell of sample) {
-      const { px, acts, samples } = bestOf.get(cell);
+      const rec = bestOf.get(cell) ?? cursorBest.get(cell);
       await openPuzzle(page, entry);
-      await applyActs(page, acts);
-      const got = await confirmWithRealTap(page, cell, px, platform);
-      confirmations.push({ cell, cost: costOf.get(cell), samples, apertureCssPx2: samples * step * step, ...got });
+      const settles = await applyActs(page, rec.acts, { platform });
+      const got = await confirmWithRealTap(page, cell, rec.px, platform);
+      confirmations.push({
+        cell, cost: rec.cost, peel: rec.peel ?? 0, samples: rec.samples,
+        apertureCssPx2: rec.samples * step * step, replaySettled: settles.every((a) => a.settled !== false), ...got,
+      });
+      // The map records the outcome too, so a reader of the JSON can tell a confirmed
+      // cell from an unexamined one without cross-referencing the confirmations array.
+      if (bestOf.has(cell)) bestOf.get(cell).confirmed = got.ok;
+      if (cursorBest.has(cell)) cursorBest.get(cell).confirmed = got.ok;
       check(
-        `${platform.label} ${key}: a real ${platform.touch ? 'tap' : 'click'} reaches cell ${cell} (cost ${costOf.get(cell)})`,
+        `${platform.label} ${key}: a real ${platform.touch ? 'tap' : 'click'} reaches cell ${cell} ` +
+          `(cost ${rec.cost}${rec.peel ? `, peel ${rec.peel}` : ''})`,
         got.ok,
         `changed=${JSON.stringify(got.changed)} routed to ${got.routed}`,
       );
     }
+    const confirmed = confirmations.filter((c) => c.ok).length;
 
     // Aperture distribution, in CSS px² of clickable area at each cell's best angle.
     // 44x44 = 1936 px² is the usual floor for a finger-sized target; 24x24 = 576 for a
     // mouse. Both bands are reported so the verdict can say which platform is hurt.
-    const apertures = [...bestOf.entries()].map(([cell, b]) => ({
-      cell, samples: b.samples, px2: b.samples * step * step, cost: b.cost,
-    }));
-    const sortedAp = [...apertures].sort((a, b) => a.px2 - b.px2);
+    const aperture = apertureOf(bestOf, step);
+    const cursorAperture = apertureOf(cursorBest, step);
 
     results[key] = {
       dims: entry.dims,
@@ -641,28 +1186,62 @@ async function runReach(page, platform, { dimsList, step, out, check }) {
       // and its aperture there. `play` replays exactly this, which is what makes the two
       // modes agree, and the report reads its numbers off the same record.
       pixelByCell: Object.fromEntries(bestOf),
-      aperture: {
-        min: sortedAp[0]?.px2 ?? 0,
-        median: sortedAp[Math.floor(sortedAp.length / 2)]?.px2 ?? 0,
-        underMouse24: apertures.filter((a) => a.px2 < 576).length,
-        underFinger44: apertures.filter((a) => a.px2 < 1936).length,
-        tightest: sortedAp.slice(0, 12),
+      aperture,
+      // The same box with the depth cursor in the player's hands. Separate on purpose:
+      // `reached`/`aperture` above are camera-work-only and comparable with every run
+      // taken before the cursor shipped; these are the shipped game.
+      cursor: {
+        maxDepth: peel ? cursor0.max : 0,
+        axis: cursor0.axis,
+        sign: cursor0.sign,
+        reached: cursorBest.size,
+        unreachable: Array.from({ length: total }, (_, i) => i).filter((i) => !cursorBest.has(i)),
+        // how many cells got their widest shot at each cursor depth, 0 = camera alone
+        byDepth: Array.from({ length: (peel ? cursor0.max : 0) + 1 }, (_, d) =>
+          [...cursorBest.values()].filter((b) => (b.peel ?? 0) === d).length),
+        aperture: cursorAperture,
+        pixelByCell: Object.fromEntries(cursorBest),
+        firstSeenAt: Object.fromEntries(cursorFirst),
       },
+      // Per step, including the ones dropped unsettled — `scripts/aim-compare.mjs` diffs
+      // two runs step by step off this, and a dropped step has to be visible there or
+      // the diff reads as "this step reached nothing".
       perStep,
-      confirmations,
+      settle: {
+        steps: plan.length,
+        unsettled: unsettledSteps,
+        // Frames each act needed to converge — the distribution that replaced sleep(420).
+        framesPerAct: perStep.flatMap((p) => p.settles.filter((a) => a.probed).map((a) => a.frames)),
+      },
+      confirmations: { confirmed, sampled: confirmations.length, cells: confirmations },
       elapsedMs: Date.now() - startedAt,
     };
 
     const r = results[key];
     console.log(
-      `  ${key}: ${r.reached}/${total} reachable  ` +
+      `  ${key}: ${r.reached}/${total} reachable by camera  ` +
         `[cost0=${r.byCost[0]} orbit=${r.byCost[1]} zoom=${r.byCost[2]} inside=${r.byCost[3]}]  ` +
         `aperture min=${r.aperture.min}px² med=${r.aperture.median}px²  ` +
         `<24px:${r.aperture.underMouse24} <44px:${r.aperture.underFinger44}  ` +
         `${((Date.now() - startedAt) / 1000).toFixed(0)}s`,
     );
+    console.log(
+      `  ${key}: ${r.cursor.reached}/${total} with the depth cursor (max depth ${r.cursor.maxDepth})  ` +
+        `aperture min=${r.cursor.aperture.min}px² med=${r.cursor.aperture.median}px²  ` +
+        `<24px:${r.cursor.aperture.underMouse24} <44px:${r.cursor.aperture.underFinger44}  ` +
+        `| confirmed ${confirmed}/${confirmations.length} by real ${platform.touch ? 'tap' : 'click'}` +
+        `${unsettledSteps ? `  | ${unsettledSteps}/${plan.length} steps DROPPED unsettled` : ''}`,
+    );
     check(`${platform.label} ${key}: every cell of the box is reachable by pointer`, r.reached === total,
-      `${r.reached}/${total}, ${r.unreachable.length} unreachable`);
+      `${r.reached}/${total} with camera work alone, ${r.unreachable.length} unreachable`);
+    check(`${platform.label} ${key}: every cell of the box is reachable with the depth cursor`,
+      r.cursor.reached === total,
+      `${r.cursor.reached}/${total} with the cursor, ${r.cursor.unreachable.length} unreachable: ` +
+        `${r.cursor.unreachable.slice(0, 12).join(' ')}`);
+    // Without this the sweep could quietly measure a camera that was still swinging and
+    // report the result as fact — which is the bug DOO-31 was filed for.
+    check(`${platform.label} ${key}: every sweep step's camera converged before the raster ran`,
+      unsettledSteps === 0, `${unsettledSteps} of ${plan.length} steps dropped`);
 
     // Written per size, not once at the end: a full sweep is tens of minutes, and a
     // crash or a kill on the last size used to throw away every size before it.
@@ -713,7 +1292,9 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     // would wipe every group played before this one. The board has to come back from
     // storage so the groups accumulate into one playthrough.
     await openPuzzle(page, entry, { fresh: false });
-    await applyActs(page, group.acts);
+    // `probe: false`: the settle poll is synthetic taps, and this board is holding the
+    // progress of every group played before this one — see `settle()`.
+    await applyActs(page, group.acts, { platform, probe: false });
 
     // Tap the whole group, then diff once. Reading the board after every tap doubles the
     // CDP round trips for a run that is already thousands of them; cells that did not
@@ -772,7 +1353,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     for (const { i, v } of strays) {
       const rec = pixelByCell[i];
       await openPuzzle(page, entry, { fresh: false });
-      await applyActs(page, rec.acts);
+      await applyActs(page, rec.acts, { platform, probe: false });
       // FILLED -> MARKED -> BLANK is two taps; MARKED -> BLANK is one.
       for (let n = 0; n < (v === 1 ? 2 : 1); n++) {
         await realTap(page, rec.px[0], rec.px[1], platform);
@@ -828,12 +1409,12 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
 /**
  * Targeted hunt for specific cells the broad sweep never reached.
  *
- * The broad sweep is a 35-orientation *sample*, so "not found" there means "not found",
- * not "impossible". Before a puzzle can be called unfinishable, the cells it needs have
- * to survive a search that uses every camera affordance the player has — including the
- * two the sweep barely touches: dollying the camera *inside* the box, and panning the
- * target sideways once inside (orbit and dolly both aim at the centre, so pan is the
- * only way to get next to a particular cell).
+ * The broad sweep is a finite *sample* of orientations, so "not found" there means "not
+ * found by those orientations", not "impossible". Before a puzzle can be called
+ * unfinishable, the cells it needs have to survive a search that uses every camera
+ * affordance the player has — including the two the sweep barely touches: dollying the
+ * camera *inside* the box, and panning the target sideways once inside (orbit and dolly
+ * both aim at the centre, so pan is the only way to get next to a particular cell).
  *
  * Every hit is re-confirmed with a real CDP event before it counts.
  */
@@ -856,15 +1437,19 @@ async function runProbe(page, platform, { puzzleId, cells, out, check }) {
         if (!remaining.size) break;
         await openPuzzle(page, entry);
         const rect = await page.evaluate('JSON.stringify(window.__qa.rect())').then(JSON.parse);
+        // Frames, not milliseconds, for the reason in the header — and pan is damped the
+        // same way orbit is (`target.addScaledVector(panOffset, dampingFactor)`), so the
+        // `sleep(260)` these three used to take left a third of every move unapplied.
+        const settle = () => page.evaluate('window.__qa.settle({}).then((r) => JSON.stringify(r))');
         await page.evaluate(`window.__qa.zoom(-120, ${ticks})`);
-        await sleep(260);
+        await settle();
         if (az) {
           await page.evaluate(`window.__qa.orbit(${(az / 8) * rect.height}, 0, 8)`);
-          await sleep(260);
+          await settle();
         }
         if (dx || dy) {
           await page.evaluate(`window.__qa.pan(${dx * rect.width}, ${dy * rect.height}, 5)`);
-          await sleep(260);
+          await settle();
         }
         configs++;
         const hit = await page
@@ -1174,12 +1759,30 @@ await page.evaluate(SEED_ALL_CLEARED);
 await page.goto(`${BASE}/?perf=1`);
 check(`${platform.label}: boots with no console errors`, pageErrors().length === 0, pageErrors().slice(0, 3).join(' | '));
 
+// `settle()` resolves a cell boundary by bisecting fractional client coordinates, and a
+// browser that rounded them would make every bisection return the same integer and every
+// step claim it had converged on the first probe — green, and measuring nothing. The
+// depth cursor is read through a handle that may not exist on an older build, and a sweep
+// that silently skipped the cursor band would report the pre-DOO-17 box as the shipped
+// one. Both are asserted here rather than assumed.
+// Inline rather than through the probe: `install()` latches onto a session's `cell`
+// event, and there is no session until a puzzle is open.
+check(`${platform.label}: the browser keeps a fractional clientX (sub-pixel settle)`,
+  await page.evaluate("new PointerEvent('pointerdown', { clientX: 12.25 }).clientX === 12.25"),
+  "new PointerEvent({ clientX: 12.25 }).clientX");
+check(`${platform.label}: the depth cursor is wired into the page`,
+  await page.evaluate('typeof window.__nonogram.peel === "function"'), '__nonogram.peel()');
+
 let payload = null;
 if (mode === 'reach') {
   const dimsList = flags.dims ? flags.dims.split(',').map(parseDims) : null;
   payload = await runReach(page, platform, {
     dimsList,
     step: Number(flags.step ?? 6),
+    // `--peel=off` drops the depth-cursor band and leaves the plan at the 35 camera
+    // steps it had before DOO-31 — which is how a run is made comparable with one
+    // taken before the cursor shipped.
+    peel: flags.peel !== 'off',
     out: OUT,
     check,
   });
