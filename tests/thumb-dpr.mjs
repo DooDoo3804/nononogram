@@ -86,6 +86,20 @@ const OUT = process.argv[3] ?? 'qa-out/thumb';
 const LABEL = process.argv[4] ?? 'now';
 
 mkdirSync(OUT, { recursive: true });
+
+// Without a server on BASE the first `goto` lands on an error page, and the failure
+// surfaces much later as `SecurityError: ... localStorage` — an opaque origin denying
+// storage, which reads like a browser bug rather than "nothing is serving". Say it here.
+const reachable = await fetch(`${BASE}/`, { method: 'GET' }).then(
+  (r) => r.ok,
+  () => false,
+);
+if (!reachable) {
+  console.error(`nothing serving at ${BASE} — start one first:\n`);
+  console.error(`  npx vite --port ${new URL(BASE).port} --strictPort --host 127.0.0.1 &\n`);
+  process.exit(2);
+}
+
 const { check, report, checks } = checklist();
 
 // The thumbnail previews the player's *progress*, not the answer, so a card with no
