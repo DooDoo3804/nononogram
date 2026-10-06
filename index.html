@@ -68,16 +68,37 @@
       </header>
 
       <div id="board">
-        <div class="clue-panel clue-panel--top">
-          <h2><span class="axis-dot axis-dot--y"></span>Y <small>(x × z)</small></h2>
+        <!-- Three clue tables do not fit beside a board on a phone, so every viewport
+             narrower than the three-panel frame shows one table at a time and picks it
+             with these tabs. `ui/clues.js` keeps the selection on the axis the camera
+             is looking along, so in normal play the right table is already open and the
+             tabs cost nothing; it also adds/removes the tablist ARIA roles as the
+             layout crosses the breakpoint, because they only describe the tabbed mode. -->
+        <div id="clue-tabs" class="clue-tabs">
+          <button class="clue-tab" type="button" data-axis="y" id="clue-tab-y">
+            <span class="clue-tab__axis"><span class="axis-dot axis-dot--y" aria-hidden="true"></span>Y</span>
+            <small>x × z</small>
+          </button>
+          <button class="clue-tab" type="button" data-axis="x" id="clue-tab-x">
+            <span class="clue-tab__axis"><span class="axis-dot axis-dot--x" aria-hidden="true"></span>X</span>
+            <small>y × z</small>
+          </button>
+          <button class="clue-tab" type="button" data-axis="z" id="clue-tab-z">
+            <span class="clue-tab__axis"><span class="axis-dot axis-dot--z" aria-hidden="true"></span>Z</span>
+            <small>x × y</small>
+          </button>
+        </div>
+
+        <div class="clue-panel clue-panel--top" id="clue-panel-y">
+          <h2><span class="axis-dot axis-dot--y" aria-hidden="true"></span>Y <small>(x × z)</small></h2>
           <div id="clues-y" class="clue-grid"></div>
         </div>
-        <div class="clue-panel clue-panel--left">
-          <h2><span class="axis-dot axis-dot--x"></span>X <small>(y × z)</small></h2>
+        <div class="clue-panel clue-panel--left" id="clue-panel-x">
+          <h2><span class="axis-dot axis-dot--x" aria-hidden="true"></span>X <small>(y × z)</small></h2>
           <div id="clues-x" class="clue-grid"></div>
         </div>
-        <div class="clue-panel clue-panel--right">
-          <h2><span class="axis-dot axis-dot--z"></span>Z <small>(x × y)</small></h2>
+        <div class="clue-panel clue-panel--right" id="clue-panel-z">
+          <h2><span class="axis-dot axis-dot--z" aria-hidden="true"></span>Z <small>(x × y)</small></h2>
           <div id="clues-z" class="clue-grid"></div>
         </div>
         <canvas id="scene"></canvas>
