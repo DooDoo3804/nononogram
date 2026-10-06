@@ -94,13 +94,29 @@ describe('axis colours — one triad, four copies', () => {
     expect(js).toEqual(css);
   });
 
-  it('clears WCAG 3:1 non-text contrast against the parchment behind it', () => {
+  // 4.5:1, not the 3:1 this used to assert, because the triad draws two different kinds
+  // of mark and the stricter one binds: `createAxisGizmo` paints the lines (non-text,
+  // 3:1) AND fills the X/Y/Z label glyphs with the same colour (text, AA 4.5:1). The
+  // comment on `makeAxisLabelSprite` is about exactly this — the letters once landed
+  // ~2:1 on the parchment while the lines beside them were ~5:1.
+  //
+  // Raising the floor is also what makes a green run mean something. The two triads this
+  // repo has shipped BOTH clear 3:1 — pre-DOO-9 `#b5533f/#5f8a52/#4a6fa5` does it by
+  // 0.03 on the y axis (3.03:1). So at 3:1 every assertion in this file passes on a tree
+  // that quietly lost DOO-9's correction: the copies all agree, they just agree on the
+  // old value. 4.5:1 is the line that separates them (old: 3.03-3.87, DOO-9: 4.73-5.11).
+  //
+  // This pins the choice DOO-9 already made; it does not make a new one. If the palette
+  // is retuned the number moves with it — but then it moves deliberately, in a diff.
+  it('clears WCAG AA 4.5:1 against the parchment — the axis colour also draws label text', () => {
     const measured = AXES.map((a) => [a, contrast(cssVar(`axis-${a}`), PAPER)]);
-    const thin = measured.filter(([, c]) => c < 3);
+    const thin = measured.filter(([, c]) => c < 4.5);
     expect(
-      thin.map(([a, c]) => `--axis-${a} is ${c.toFixed(2)}:1 on ${PAPER}`).join('; '),
+      thin
+        .map(([a, c]) => `--axis-${a} is ${c.toFixed(2)}:1 on ${PAPER}, under the 4.5:1 AA floor for the X/Y/Z labels`)
+        .join('; '),
     ).toBe('');
-    for (const [, c] of measured) expect(c).toBeGreaterThanOrEqual(3);
+    for (const [, c] of measured) expect(c).toBeGreaterThanOrEqual(4.5);
   });
 
   it('declares each axis variable exactly once, so "the value" is unambiguous', () => {
