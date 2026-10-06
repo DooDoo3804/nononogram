@@ -55,6 +55,12 @@
 // so a smaller share of device pixels is a blend at all), while the 1x-on-retina bug
 // lands ~1.6x above it. A fixed ceiling could not tell DOO-24's bigger drawing apart from
 // a lost buffer; this can, and it needs no recalibration the next time the art changes.
+//
+// What a ratio alone cannot see is a softening that is *uniform* across the rows, since
+// that moves its own denominator. So the 1x row itself is held to one absolute band —
+// MIN/MAX_BASELINE_FRINGE_PCT — and the retina rows to the ratio. Two readings, two
+// different failures: "the reference drawing changed character" and "this buffer is
+// smaller than its display".
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -93,6 +99,23 @@ const MAX_FRINGE_VS_1X = 1.0;
 // The 1x baseline has to actually contain a drawing: antialiased isometric diagonals over
 // most of a 100px card cannot come in under this.
 const MIN_BASELINE_FRINGE_PCT = 5;
+// The other end of the same band, and the one thing reading fringe as a ratio gave up.
+// The denominator is measured in the same run, so a regression that softens the drawing
+// *uniformly* — a shadowBlur, a mid-tone edge stroke, geometry landing on half-pixels —
+// lifts every row together and the ratio shrugs. One absolute reading, on the 1x row
+// only, keeps a tripwire on that without re-coupling the per-row checks to how large the
+// silhouette happens to be. Measured on the real card by blurring it before the sampler:
+//
+//   sharp (DOO-24)   16.24%   1.00x
+//   blur(0.5px)      24.06%   1.48x   passes — the band is coarse, and says so
+//   blur(1px)        37.57%   2.31x   convicted
+//   blur(1.5px)      46.56%   2.87x   convicted
+//
+// 30 sits above a silhouette that grows again — DOO-24 itself moved this row 10.39 ->
+// 16.24, and another step of that size lands at ~25 — and below a softening bad enough to
+// see. It catches the gross case, not a subtle one; the ratio and backing/css carry the
+// per-row work. Raise it deliberately when the art changes, with the new reading in here.
+const MAX_BASELINE_FRINGE_PCT = 30;
 
 const BASE = process.argv[2] ?? 'http://127.0.0.1:4473';
 const OUT = process.argv[3] ?? 'qa-out/thumb';
@@ -243,12 +266,18 @@ try {
   // pixels the buffer brought, which is the whole question.
   const baseline = rows.find((r) => r.dpr === 1);
   check(
-    'the 1x row is present and actually contains a drawing',
-    baseline !== undefined && baseline.fringePct >= MIN_BASELINE_FRINGE_PCT,
-    baseline ? `${baseline.fringePct}% at 1x (floor ${MIN_BASELINE_FRINGE_PCT}%)` : 'no 1x viewport in the matrix',
+    `the 1x row is present and is a drawing — neither blank nor uniformly soft (${MIN_BASELINE_FRINGE_PCT}-${MAX_BASELINE_FRINGE_PCT}%)`,
+    baseline !== undefined
+      && baseline.fringePct >= MIN_BASELINE_FRINGE_PCT
+      && baseline.fringePct <= MAX_BASELINE_FRINGE_PCT,
+    baseline
+      ? `${baseline.fringePct}% at 1x (band ${MIN_BASELINE_FRINGE_PCT}-${MAX_BASELINE_FRINGE_PCT}%)`
+      : 'no 1x viewport in the matrix',
   );
   for (const r of rows) {
-    if (r.dpr === 1) continue;
+    // With no 1x row there is nothing to read a ratio against, and the check above has
+    // already said so — don't pile a TypeError on top of its message.
+    if (r.dpr === 1 || baseline === undefined) continue;
     const vs = +(r.fringePct / baseline.fringePct).toFixed(3);
     check(
       `${r.vp}: fringe no worse than the same card at 1x (<= ${MAX_FRINGE_VS_1X}x)`,

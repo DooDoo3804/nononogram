@@ -209,14 +209,25 @@ describe('thumbFit', () => {
     // The frame is `strokeRect(1, 1, ...)` at lineWidth 2, so it owns buffer px 0-2. On a
     // 1x card that is 2% of the canvas and the margin is the only thing keeping the
     // silhouette off it.
+    //
+    // Measured against the *stroked* edge, not the path: the voxel outline is lineWidth 1
+    // and straddles the path, so ink reaches half a pixel outside the bbox this records
+    // (the same slack the overflow test above allows). Clearing the frame therefore needs
+    // 2.5, and that is the assertion that actually prices the margin — at a 100px buffer
+    // the inset is 100 * (1 - margin) / 2, so 0.92 clears by 1.5px, 0.94 by 0.5px, and
+    // 0.96 lands the tips *on* the frame stroke at -0.5. 1x is the binding case: a 2x card
+    // gets twice the inset against the same literal stroke widths.
+    const FRAME_PX = 2.5;
     const ink = inkBox({ x: 6, y: 6, z: 6 }, 100);
-    expect(ink.bounds.x0).toBeGreaterThan(2);
-    expect(100 - ink.bounds.x1).toBeGreaterThan(2);
-    expect(ink.bounds.y0).toBeGreaterThan(2);
-    expect(100 - ink.bounds.y1).toBeGreaterThan(2);
+    expect(ink.bounds.x0).toBeGreaterThan(FRAME_PX);
+    expect(100 - ink.bounds.x1).toBeGreaterThan(FRAME_PX);
+    expect(ink.bounds.y0).toBeGreaterThan(FRAME_PX);
+    expect(100 - ink.bounds.y1).toBeGreaterThan(FRAME_PX);
   });
 
   it('keeps a margin worth having — between touching the frame and wasting the card', () => {
+    // The loose end of the band. The tight end is the frame-clearance test above, which
+    // is arithmetic rather than taste: it caps the margin just under 0.95.
     expect(THUMB_MARGIN).toBeGreaterThan(0.85);
     expect(THUMB_MARGIN).toBeLessThan(0.97);
   });
