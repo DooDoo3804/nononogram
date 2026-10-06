@@ -8,7 +8,10 @@
 //   - it never moves on its own (rotating the camera does not re-aim it);
 //   - stepping re-aims to the face the camera is actually on, and a new face starts
 //     from zero instead of carrying the old axis' depth over;
-//   - a new puzzle resets it, without main.js having to remember to say so.
+//   - a new puzzle resets it, without main.js having to remember to say so;
+//   - and `state()` at depth 0 names the face the next press will take off, not the one
+//     the last puzzle happened to end on (DOO-36 — the QA harness sizes its depth plan
+//     off that `max`, so a stale axis there measures fewer layers than it reports).
 //
 // Whether the exposed layer is then actually clickable is `tests/voxels.test.js`
 // (geometry, in node) and `scripts/probe-aim.mjs` (pixels, in a browser).
@@ -174,6 +177,59 @@ describe('mountPeel', () => {
     expect(peel.depth()).toBe(3); // not read yet
     expect(peel.state().depth).toBe(0);
     expect(grid.layerWindow()).toBe(null);
+  });
+
+  describe('state() at depth 0 (DOO-36)', () => {
+    it('names the face the camera is on before any key is pressed', () => {
+      // The module starts on x-, so a z-facing camera is the case that used to lie.
+      const { peel } = mount({ view: fakeView('z', 1) });
+      expect(peel.state()).toMatchObject({ depth: 0, axis: 'z', sign: 1 });
+    });
+
+    it('does not carry the previous puzzle axis into the next one', () => {
+      // The reported bug: peel on z in one box, open another, and `state()` still said z
+      // while the first `]` peeled x. 5 of the 14 shipped boxes hit this in catalog order.
+      const view = fakeView('z', -1);
+      let grid = fakeGrid({ x: 5, y: 4, z: 3 });
+      const { peel } = mount({ view, getGrid: () => grid });
+      peel.step(2);
+      expect(peel.state()).toMatchObject({ depth: 2, axis: 'z', max: 2 });
+
+      grid = fakeGrid({ x: 5, y: 4, z: 3 }); // next puzzle
+      view.turnTo('x', -1);
+      expect(peel.state()).toMatchObject({ depth: 0, axis: 'x', sign: -1, max: 4 });
+      // and the first press agrees with what was reported, which is the whole claim
+      expect(peel.step(1)).toBe(1);
+      expect(grid.layerWindow()).toEqual({ axis: 'x', from: 0, to: 3 });
+    });
+
+    it('reports max off the axis it names, not off a leftover one', () => {
+      // 3x3x2 reported max 2 from a stale x while the real near face had max 1, and the
+      // harness then asked for a depth that cannot exist and dropped the step.
+      const { peel } = mount({ view: fakeView('z', -1), grid: fakeGrid({ x: 3, y: 3, z: 2 }) });
+      expect(peel.state().max).toBe(1);
+      expect(peel.setDepth(99)).toBe(1);
+    });
+
+    it('still reports the applied face past depth 0, camera or no camera', () => {
+      // The depth-0 derivation must not become a per-frame re-aim: once a window is
+      // applied, its axis is the answer even after the player rotates away.
+      const { peel, view } = mount();
+      peel.step(2);
+      view.turnTo('z', 1);
+      expect(peel.state()).toMatchObject({ depth: 2, axis: 'x', sign: -1 });
+      // Back at 0 the camera takes over again — turned back first so that the step's own
+      // reaim is a no-op and the derivation is the only thing that can answer.
+      view.turnTo('x', -1);
+      expect(peel.step(-2)).toBe(0);
+      view.turnTo('y', 1);
+      expect(peel.state()).toMatchObject({ depth: 0, axis: 'y', sign: 1, max: 5 });
+    });
+
+    it('falls back to its own cursor when the view cannot say', () => {
+      const { peel } = mount({ view: { facing: () => null } });
+      expect(peel.state()).toMatchObject({ depth: 0, axis: 'x', sign: -1, max: 5 });
+    });
   });
 
   it('is inert with no puzzle open', () => {

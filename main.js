@@ -208,8 +208,9 @@ window.__nonogram = {
   // events and reads this to assert where it landed. A setter here would let a
   // measurement pass while the binding a player uses stayed broken.
   peel: () => peel.state(),
-  // What the stepper is *showing*, which is not always `peel.state()`: at depth 0 it
-  // names the face the next press will take off, and past it, both. The DOO-28 probe
-  // clicks `#peel-more` like a player does and reads this to assert the two agree.
+  // What the stepper is *showing*, which is not always `peel.state()`: past depth 0 the
+  // readout also names the face a re-aim is pending on, which the cursor itself has no
+  // business reporting. At depth 0 the two now agree on the axis (DOO-36). The DOO-28
+  // probe clicks `#peel-more` like a player does and reads this to assert that.
   peelUi: () => peelControl.model(),
 };
