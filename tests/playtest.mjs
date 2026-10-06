@@ -1054,19 +1054,66 @@ function sweepPlan({ maxPeel = 0 } = {}) {
  * `probe: false` is for `play`: see `settle()` for why a playthrough must not run
  * synthetic taps while it is holding real progress on the board.
  */
-async function applyActs(page, acts, { platform, probe = true, settle = {} } = {}) {
+/**
+ * `diffBoard`: read the board around every act and attach the cells it changed.
+ *
+ * A camera move must not change the board. Nothing asserted that, and the acts are
+ * dispatched as real-shaped pointer gestures, so an act whose press and release land on
+ * the same pixel is a click by any definition the input layer uses. This is measured
+ * through the acts themselves rather than a re-implementation of them: a probe that
+ * copied `orbitBy` would be testing the copy. Off by default — it costs two board reads
+ * per act, and only the correction pass needs it.
+ */
+async function applyActs(page, acts, { platform, probe = true, settle = {}, diffBoard = false } = {}) {
   const done = [];
   for (const act of acts) {
+    const boardBefore = diffBoard
+      ? await page.evaluate('JSON.stringify(window.__qa.board())').then(JSON.parse)
+      : null;
+    const noteDiff = async (entry) => {
+      if (!diffBoard) return entry;
+      const boardAfter = await page.evaluate('JSON.stringify(window.__qa.board())').then(JSON.parse);
+      const moved = [];
+      boardBefore.forEach((v, i) => { if (v !== boardAfter[i]) moved.push({ cell: i, from: v, to: boardAfter[i] }); });
+      return { ...entry, moved };
+    };
     if (act.kind === 'peel') {
       const got = await setPeelDepth(page, platform, act.depth);
-      done.push({
+      done.push(await noteDiff({
         act: `peel ${act.depth}`,
         settled: got.depth === act.depth,
         depth: got.depth,
         requested: act.depth,
         detail: `${got.via} x${got.presses} -> depth ${got.depth}/${got.max} on ` +
           `${got.axis}${got.sign < 0 ? '-' : '+'}`,
-      });
+      }));
+      continue;
+    }
+    // A zero-magnitude orbit is dispatched as nothing at all, because dispatching it is
+    // a click. `sweepPlan` builds the straight-on shot as `{ kind: 'orbit', dx: az / 8 }`
+    // with az = 0, and `orbitBy` turns any orbit into
+    //
+    //     pointerdown(cx, cy) -> pointermove(cx + dx*n/steps, ...) -> pointerup(cx + dx, cy + dy)
+    //
+    // With dx = dy = 0 the press and the release land on the same pixel with no movement
+    // between them, which is a click by the definition the shipped input layer uses — so
+    // the "camera move" cycled whatever cell sat under the canvas centre. At a 14- or
+    // 26-tick dolly the camera is inside the box, so the centre is always over a cell.
+    //
+    // That is defect V, and it is the whole of defect L: the correction pass read the
+    // board, replayed this act, and then computed its tap count from the value it had
+    // read *before* the act silently advanced the cell by one. Two taps that should have
+    // run FILLED -> MARKED -> BLANK ran MARKED -> BLANK -> FILLED instead, so the cell
+    // came back wrong, every round, on both platforms. Measured in `cameraEdits`.
+    //
+    // Skipping it loses no camera motion: a rotation of zero is the identity. The act
+    // stays in `done` so the plan's step list still reads the same.
+    if (act.kind === 'orbit' && !act.dx && !act.dy) {
+      done.push(await noteDiff({
+        act: `orbit ${act.dx},${act.dy}`,
+        settled: true, took: true, movedPx: 0,
+        detail: 'zero-magnitude orbit — identity rotation, not dispatched (defect V)',
+      }));
       continue;
     }
     // One call dispatches the gesture and settles it — see `act()` for why the round
@@ -1087,7 +1134,7 @@ async function applyActs(page, acts, { platform, probe = true, settle = {} } = {
     const movedPx = before && got.at && before.key === got.at.key && before.t.length === got.at.t.length
       ? Math.max(...got.at.t.map((v, i) => Math.abs(v - before.t[i])))
       : null;
-    done.push({
+    done.push(await noteDiff({
       act: act.kind === 'zoom' ? `zoom ${act.ticks}t` : `orbit ${act.dx},${act.dy}`,
       settled: got.settled !== false,
       probed: got.probed,
@@ -1099,7 +1146,7 @@ async function applyActs(page, acts, { platform, probe = true, settle = {} } = {
       // Only on failure, and only then: this is the per-probe movement history, and it is
       // the whole diagnosis of a step that would otherwise just say "did not converge".
       ...(got.settled === false ? { trace: got.trace, key: got.key } : {}),
-    });
+    }));
   }
   return done;
 }
@@ -1507,6 +1554,23 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
   // is something the correction pass has tried to repair.
   let corrections = 0;
   let converged = false;
+  // Why this pass is traced at all (report §28.4, defects M and U). Two things were
+  // measured nowhere: the `applyActs` result was discarded here (so a `peel`/`zoom` that
+  // landed short left the recorded pixel describing a camera that is not on screen, and
+  // nothing said so -- defect M), and "is this pixel the canvas's to receive" was only
+  // ever asked by a probe that asked it *after* its own taps had already changed the
+  // screen (defect U). Both are asked here, in the real pass, at the only moment that
+  // answers the question: immediately before each corrective tap goes out.
+  //
+  // `shadowPx` is a *measurement, not a correction*: the group loop re-localizes every
+  // pixel through `findPixel` before tapping ("the recorded pixel is only a hint",
+  // line ~1443) and this pass does not. Recording what `findPixel` would have returned,
+  // without tapping there, is what separates "the product ignored a real tap" from "the
+  // harness aimed at a stale pixel". Using it would repair the symptom and destroy the
+  // evidence, so it is recorded and deliberately not used.
+  const correctionUnsettled = [];
+  const correctionTrace = [];
+  const cameraEdits = [];
   for (let round = 0; round < 3; round++) {
     const board = await page.evaluate('JSON.stringify(window.__qa.board())').then(JSON.parse);
     const off = board
@@ -1517,15 +1581,62 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     for (const { i, v, want } of off) {
       const rec = pixelByCell[i];
       await openPuzzle(page, entry, { fresh: false });
-      await applyActs(page, rec.acts, { platform, probe: false });
+      // `v` came from the board read at the top of this round. Re-opening the puzzle
+      // reloads the session from storage; if the two disagree, every tap count computed
+      // from `v` is computed from a stale value.
+      const stateAfterOpen = await page.evaluate(`window.__qa.board()[${i}]`);
+      const applied = await applyActs(page, rec.acts, { platform, probe: false, diffBoard: true });
+      for (const a of applied ?? []) {
+        if (a.settled === false) {
+          correctionUnsettled.push({ round, cell: i, act: a.act, detail: a.detail ?? null });
+        }
+        // A camera move that edits the board invalidates the tap count computed from the
+        // board read before it.
+        if (a.moved?.length) {
+          cameraEdits.push({ round, cell: i, act: a.act, moved: a.moved });
+        }
+      }
+      // What the browser would route a tap at the recorded pixel to, and where the cell
+      // actually is, both read before any tap of this group is dispatched.
+      const aim = await page
+        .evaluate(`JSON.stringify((() => {
+          // Read BEFORE the shadow probe. \`findPixel\` taps and restores, so if it
+          // restored imperfectly it would be this trace's own fault -- the two reads
+          // bracket it and settle that, instead of leaving it to be argued about.
+          const stateBeforeProbe = window.__qa.board()[${i}];
+          const f = window.__qa.findPixel(${i}, ${JSON.stringify(rec.px)}, 14, 2);
+          return {
+            el: window.__qa.elementAt(${rec.px[0]}, ${rec.px[1]}),
+            solved: window.__qa.solved(),
+            stateBeforeProbe,
+            state: window.__qa.board()[${i}],
+            park: f.park, guarded: f.guarded,
+            shadowPx: f.px, shadowSamples: f.samples, shadowInCanvas: f.inCanvas,
+          };
+        })())`)
+        .then(JSON.parse);
       // The cycle is BLANK -> FILLED -> MARKED -> BLANK, so the number of taps that
       // carries `v` to `want` is the distance around that ring.
       const taps = ((want - v) % 3 + 3) % 3;
+      const moved = [];
       for (let n = 0; n < taps; n++) {
+        const pre = await page.evaluate('JSON.stringify(window.__qa.board())').then(JSON.parse);
         await realTap(page, rec.px[0], rec.px[1], platform);
         corrections++;
         await settleTaps(page);
+        const post = await page.evaluate('JSON.stringify(window.__qa.board())').then(JSON.parse);
+        const diff = [];
+        pre.forEach((pv, pi) => { if (pv !== post[pi]) diff.push({ cell: pi, from: pv, to: post[pi] }); });
+        moved.push({ tap: n + 1, diff });
       }
+      correctionTrace.push({
+        round, cell: i, from: v, stateAfterOpen, want, px: rec.px, peel: rec.peel ?? 0, step: rec.step,
+        samples: rec.samples ?? null, aim, taps: moved,
+        // The whole diagnosis in one field: did the recorded pixel still name this cell?
+        shadowDelta: aim.shadowPx
+          ? [aim.shadowPx[0] - rec.px[0], aim.shadowPx[1] - rec.px[1]]
+          : null,
+      });
     }
   }
 
@@ -1562,6 +1673,9 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     probeLatches,
     offCanvas,
     unsettled,
+    correctionUnsettled,
+    correctionTrace,
+    cameraEdits,
     unfixed,
     correctionsConverged: converged,
     solved,
@@ -1589,6 +1703,24 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     unsettled.length === 0,
     `${unsettled.length} unsettled: ${JSON.stringify(unsettled.slice(0, 3))}`,
   );
+  // Defect M. The check above covers the *main* pass only; until now nothing asserted
+  // that the camera the correction pass replays actually arrived, which is precisely
+  // where both DOO-8 failures land. A corrective tap aimed from a camera that stopped
+  // short is aimed at a pixel describing a view that is not on screen.
+  check(
+    `${platform.label} ${entry.id}: every camera move the correction pass replayed was reproduced`,
+    correctionUnsettled.length === 0,
+    `${correctionUnsettled.length} unsettled: ${JSON.stringify(correctionUnsettled.slice(0, 3))}`,
+  );
+  // A camera move is not an edit. If replaying one changes a cell, every tap count the
+  // correction pass computes from the board it read beforehand is computed from a value
+  // that is already stale — which is exactly how a cell can be "corrected" into staying
+  // wrong forever.
+  check(
+    `${platform.label} ${entry.id}: replaying the camera never edits the board`,
+    cameraEdits.length === 0,
+    `${cameraEdits.length} camera acts moved cells: ${JSON.stringify(cameraEdits.slice(0, 3))}`,
+  );
   check(
     `${platform.label} ${entry.id}: the correction pass left no reachable cell wrong`,
     unfixed.length === 0,
@@ -1602,6 +1734,31 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
       `${corrections} corrective, ${stranded.length} stranded, ${misses.length} missed, ` +
       `${wrong} wrong, solved=${solved}`,
   );
+  // The diagnosis goes in the log, not only in the JSON. Every defect in this report's
+  // ledger that stayed alive for more than one run did so because the evidence was in a
+  // file someone had to know to open.
+  if (unfixed.length) {
+    const stuck = new Set(unfixed.map((u) => u.cell));
+    console.log(`  trace  ${entry.id}: correction pass on ${stuck.size} cell(s) that stayed wrong`);
+    for (const t of correctionTrace.filter((t) => stuck.has(t.cell))) {
+      const el = t.aim.el
+        ? `<${t.aim.el.tag.toLowerCase()}${t.aim.el.id ? '#' + t.aim.el.id : ''}`
+          + `${t.aim.el.cls ? '.' + t.aim.el.cls.trim().split(/\s+/).join('.') : ''}>`
+        : 'null';
+      const landed = t.taps.reduce((a, m) => a + m.diff.length, 0);
+      console.log(
+        `         r${t.round} cell ${t.cell} ${t.from}->${t.want} px=[${t.px}] peel=${t.peel} `
+        + `samples=${t.samples}\n`
+        + `           topmost-before-tap ${el}  solved=${t.aim.solved}\n`
+        + `           state: round-read=${t.from} after-open=${t.stateAfterOpen} `
+        + `before-probe=${t.aim.stateBeforeProbe} at-tap=${t.aim.state}  `
+        + `park=${t.aim.park} guarded=${t.aim.guarded}\n`
+        + `           shadowPx=${JSON.stringify(t.aim.shadowPx)} delta=${JSON.stringify(t.shadowDelta)} `
+        + `shadowSamples=${t.aim.shadowSamples} inCanvas=${t.aim.shadowInCanvas}\n`
+        + `           ${t.taps.length} tap(s) moved ${landed} cell(s): ${JSON.stringify(t.taps.map((m) => m.diff))}`,
+      );
+    }
+  }
   if (solved) {
     check(`${platform.label} ${entry.id}: clear celebration fired`, celebrated);
     check(`${platform.label} ${entry.id}: record persisted as solved`, result.record?.solved === true,
