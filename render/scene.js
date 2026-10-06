@@ -126,9 +126,9 @@ export function refitDistance(current, previousFit, nextFit) {
 //   cap 3     360x740 2.20M px → 1.65ms         → ~16.5ms. Blows it.
 //
 // So 2 is the last ratio that survives the pessimistic projection — and it is also
-// the exact device ratio on DPR-2 tablets, so they pay no approximation at all. The
-// 5-10x multiplier is literature, not a reading off a handset; a physical-device
-// number is still owed and belongs to the QA track.
+// the exact device ratio on DPR-2 tablets, so they pay no approximation at all. Note
+// what kind of claim that is. 0.95ms/Mpx is the only measured term; the 5-10x it is
+// divided by is literature, not a reading off a handset.
 //
 // How far the 5-10x projection is from the pessimistic end (DOO-20). Re-running the
 // same sweep against forced SwiftShader — the backend the first draft of this comment
@@ -137,8 +137,18 @@ export function refitDistance(current, previousFit, nextFit) {
 // there, 1x included: 6³ p95 goes 33ms at cap 1 to 72ms at cap 2.625. That is not a
 // phone verdict, because no phone GPU is two orders of magnitude off a laptop's. What
 // it does establish is that the slow end of the fill axis was measured and not merely
-// assumed, and that 5-10x sits well inside the bracket rather than at its edge. The
-// knee's real location is still DOO-12's to find; this constant is the knob it moves.
+// assumed, and that 5-10x sits well inside the bracket rather than at its edge.
+//
+// Where the knee really sits on a handset is not going to be answered. The physical
+// device reading is no longer a release condition — DOO-12 is cancelled, by board
+// decision — so real GPU bandwidth, thermal throttling and the browser compositor
+// stay unverified for this cap, and the release notes say that outright instead of
+// implying a measurement is pending. The projection and the bracket above are the
+// whole basis for the value, and they are enough to ship it.
+//
+// This constant is still the knob. If a reason to move it turns up — a handset in
+// hand, a field report, a heavier scene — open a new issue and bring a sweep; there
+// is no open tracking issue left to inherit.
 export const MAX_PIXEL_RATIO = 2;
 
 /** The ratio actually handed to WebGL: the device's, clamped to `cap`. */
@@ -157,6 +167,11 @@ export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO, fitMargin 
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
+  // Set here rather than left to OrbitControls, which happens to do the same thing in its
+  // constructor. Without it a one-finger drag on mobile scrolls the page and the browser
+  // steals the pointer mid-gesture — which kills paint strokes (ui/gestures.js), not just
+  // rotation. Too load-bearing to inherit from a library side effect we don't control.
+  canvas.style.touchAction = 'none';
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.8));
   const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);

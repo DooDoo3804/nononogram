@@ -28,7 +28,10 @@
 // goes from 17.8ms to 33ms at a 1x buffer and 73-80ms at the shipped 2x cap, while
 // cpu/frame stays under 0.9ms throughout: every millisecond that moves lives
 // downstream of our code, on the one axis this profile flatters. Neither reading is a
-// phone — see the bracket in render/scene.js — and DOO-12 still needs a device.
+// phone — they are the two ends of the bracket in render/scene.js — and no phone
+// reading is coming: DOO-12 is cancelled, so a physical-device measurement is not a
+// release condition and the shipped cap rests on that bracket plus a 5-10x literature
+// projection. Moving the cap on new evidence takes a new issue, not that one.
 //
 // So: the draw-call, triangle, build-time, repaint and pixel-ratio numbers are exact
 // and hardware-independent — those are the ones to quote. The timing columns describe
