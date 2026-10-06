@@ -8,7 +8,13 @@
 import { describe, it, expect } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { pipeConnection, assertNodeSupport, MIN_NODE, shouldWatchParent } from '../scripts/cdp.mjs';
+import {
+  pipeConnection,
+  assertNodeSupport,
+  MIN_NODE,
+  shouldWatchParent,
+  profileRemoval,
+} from '../scripts/cdp.mjs';
 
 /** A stand-in for the Chrome child process: fd 3 we write, fd 4 it writes. */
 function fakeChrome() {
@@ -165,5 +171,22 @@ describe('parent-death watchdog arming', () => {
     // Only the exact opt-in value counts — a stray empty or "0" must not disarm it.
     expect(shouldWatchParent(4321, { NONOGRAM_CDP_NO_PARENT_WATCH: '0' })).toBe(true);
     expect(shouldWatchParent(4321, { NONOGRAM_CDP_NO_PARENT_WATCH: '' })).toBe(true);
+  });
+});
+
+describe('profile removal', () => {
+  // The measured regression, locked down: rmSync's retries are a blocking sleep, so on
+  // the paths that run while the process is dying they held an orphaned harness node
+  // alive for 17.2s — and still left the dir behind. Nothing may wait for a dir there;
+  // `sweepStaleProfiles` takes what is left at the next launch.
+  it('never blocks on the paths that run while the process is dying', () => {
+    const opts = profileRemoval({ patient: false });
+    expect(opts.maxRetries).toBeUndefined();
+    expect(opts.retryDelay).toBeUndefined();
+    expect(opts.recursive).toBe(true);
+  });
+
+  it('retries only for close(), where a caller is awaiting it', () => {
+    expect(profileRemoval({ patient: true }).maxRetries).toBe(10);
   });
 });

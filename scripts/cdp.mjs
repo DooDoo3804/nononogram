@@ -133,8 +133,10 @@ function installTeardown() {
  *   - `NONOGRAM_CDP_NO_PARENT_WATCH=1` opts out, for a run meant to outlive its shell.
  *
  * The exit is `process.exit`, which runs the layer-3 listener above, which closes the
- * browsers and removes the profiles. 143 = 128+SIGTERM: not killed by a signal, but the
- * same meaning, and distinguishable from a gate's own failure codes.
+ * browsers and makes one unblocking attempt at their profiles — the dir is never worth
+ * delaying this exit for, and the first version of it delayed the exit by 17.2s. See
+ * `removeProfile`. 143 = 128+SIGTERM: not killed by a signal, but the same meaning, and
+ * distinguishable from a gate's own failure codes.
  */
 export function shouldWatchParent(launcher, env = process.env) {
   if (env.NONOGRAM_CDP_NO_PARENT_WATCH === '1') return false;
@@ -283,6 +285,28 @@ export function pipeConnection(proc) {
  * is never a candidate. A recycled pid means a stale dir survives a round, which costs
  * nothing.
  */
+/**
+ * `rmSync` options for removing a profile dir. `patient` was first written backwards.
+ *
+ * The retries do block — that part was right — but blocking is exactly wrong on the
+ * death paths, because what waits on them is the process's own exit. Measured: the
+ * orphan watchdog fired in under a second and killed the browser, then the `exit`
+ * listener sat in rmSync's backoff and the harness node stayed alive for **17.2s** in 2
+ * of 3 runs — and the dir was still there afterwards, 53 files of it. The full
+ * 300ms × (1+2+…+10) budget, spent to fail. So an orphaned run went on existing for 17
+ * seconds after it had already decided to stop, which is the leak this file exists to
+ * close.
+ *
+ * Patience belongs only to `close()`, where a caller is awaiting a promise and nothing
+ * is trying to die. Everywhere else: one pass, keep what it got, leave the rest.
+ * `sweepStaleProfiles` collects the remainder at the next launch — the same contract
+ * SIGKILL has always had, and it costs ~2.8MB in TMPDIR for one round.
+ */
+export function profileRemoval({ patient }) {
+  const base = { recursive: true, force: true };
+  return patient ? { ...base, maxRetries: 10, retryDelay: 300 } : base;
+}
+
 function sweepStaleProfiles() {
   let entries = [];
   try {
@@ -374,11 +398,9 @@ export async function launchChrome({ offline = false, gl = 'auto', gpuFlags, win
     try { proc.kill(signal); } catch { /* already dead */ }
     return true;
   };
-  const removeProfile = () => {
-    // rmSync's retries block, which is what the signal path needs: Chrome may still be
-    // unlinking inside the profile and there is nothing left to yield to.
+  const removeProfile = ({ patient }) => {
     try {
-      rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+      rmSync(profile, profileRemoval({ patient }));
     } catch { /* a profile dir left in TMPDIR is the reaper's problem, not a run's */ }
   };
 
@@ -395,7 +417,7 @@ export async function launchChrome({ offline = false, gl = 'auto', gpuFlags, win
     async close() {
       shutDown('SIGTERM');
       await sleep(500); // let Chrome finish flushing, then take the whole dir with it
-      removeProfile();
+      removeProfile({ patient: true });
     },
     /**
      * The teardown the exit and signal handlers call. Never await this.
@@ -404,9 +426,12 @@ export async function launchChrome({ offline = false, gl = 'auto', gpuFlags, win
      * gracefully rewrites its profile *after* the removal, and on this path there is no
      * 500ms to wait it out. Measured on node 18 — 234 files, removed, 51 of them back.
      * So the browser loses the ability to write instead of being raced for it.
+     *
+     * And it does not wait for the dir to actually go: see `removeProfile`. Dying fast
+     * is this path's whole job; the dir is the next launch's problem.
      */
     tearDown() {
-      if (shutDown('SIGKILL')) removeProfile();
+      if (shutDown('SIGKILL')) removeProfile({ patient: false });
     },
   };
 
