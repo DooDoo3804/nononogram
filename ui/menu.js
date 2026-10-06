@@ -7,9 +7,45 @@
 //   .reopenCurrentLevel()    same, for whichever level is open (progress changed)
 
 import { drawThumb } from '../render/thumbnail.js';
+import { resolvePixelRatio } from '../render/scene.js';
 import { FILLED } from '../state/cells.js';
 
-const THUMB_SIZE = 100;
+/** The thumbnail's CSS box. The drawing buffer is this times the display's ratio. */
+export const THUMB_SIZE = 100;
+
+/**
+ * Give a thumbnail canvas the pixels the display actually has (DOO-21).
+ *
+ * `canvas.width` is the drawing buffer, not the layout box — a 2D canvas is no
+ * different from WebGL here. Left at `THUMB_SIZE` it is 100x100 real pixels stretched
+ * over a 100 CSS px box, which on a DPR-2 phone is a quarter of the pixels under it
+ * and on DPR 3 a ninth, upscaled by the compositor. So the buffer gets the ratio and
+ * the CSS box is pinned, which is the part that keeps the card layout from moving.
+ *
+ * The ratio is `render/scene.js`'s, cap included, deliberately rather than raw
+ * `devicePixelRatio`: one retina policy for the app is worth more than the extra
+ * sharpness a 3x thumbnail would buy. DOO-19 capped at 2 to protect the board's fill
+ * rate, and a static 100px raster has no frame budget to defend — but a thumbnail
+ * that renders at 3x while the board it previews renders at 2x is a seam a future
+ * reader has to re-derive, and at this size 2x is already past where the voxel edges
+ * resolve (see the before/after crops on DOO-21).
+ *
+ * `drawThumb` needs no change for this: it derives every coordinate from
+ * `canvas.width`/`height`, so a bigger buffer draws the same picture bigger. Its two
+ * stroke widths are the exception — they are literals, so they stay device pixels and
+ * get finer as the ratio rises. At 2x that reads as a crisper hairline rather than a
+ * thinner line, which is the direction a retina fix should move anyway.
+ *
+ * @returns {number} the ratio applied, so a caller can report it
+ */
+export function sizeThumbCanvas(canvas, size = THUMB_SIZE, dpr = globalThis.devicePixelRatio) {
+  const ratio = resolvePixelRatio(dpr);
+  canvas.width = Math.round(size * ratio);
+  canvas.height = Math.round(size * ratio);
+  canvas.style.width = `${size}px`;
+  canvas.style.height = `${size}px`;
+  return ratio;
+}
 
 export function mountMenu({ levels, getProgress, onOpenPuzzle, show }) {
   const levelsGrid = document.getElementById('levels-grid');
@@ -31,8 +67,7 @@ export function mountMenu({ levels, getProgress, onOpenPuzzle, show }) {
       card.className = 'puzzle-card';
 
       const thumb = document.createElement('canvas');
-      thumb.width = THUMB_SIZE;
-      thumb.height = THUMB_SIZE;
+      sizeThumbCanvas(thumb);
       drawThumb(thumb, spec.dims, cells);
       card.appendChild(thumb);
 
