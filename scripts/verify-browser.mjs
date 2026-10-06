@@ -153,6 +153,25 @@ const drag = async (path) => {
   await sleep(200);
 };
 
+// Touch is not the mouse path with a different label. It comes in through a different CDP
+// domain, it only reaches the page as pointer events while touch emulation is on, and a
+// one-finger drag only *stays* one gesture while the canvas has opted out of browser
+// scrolling — without `touch-action: none` the browser claims the drag as a page scroll
+// and fires pointercancel, which ends the stroke mid-sweep. Mouse drags cannot catch
+// either failure, so the paint section below runs the sweep a second time on touch.
+const touchDrag = async (path) => {
+  const steps = [['touchStart', [0, 0]], ...path.map((p) => ['touchMove', p]), ['touchEnd', null]];
+  for (const [type, offset] of steps) {
+    await page.call('Input.dispatchTouchEvent', {
+      type,
+      // touchEnd carries no points: the finger that lifted is gone from the set.
+      touchPoints: offset ? [{ x: box.x + offset[0], y: box.y + offset[1], id: 1 }] : [],
+    });
+    await sleep(40);
+  }
+  await sleep(200);
+};
+
 /**
  * A boustrophedon sweep over a 2*reach square centred on the press, in `step`-px moves.
  *
@@ -234,6 +253,37 @@ check(
     (await page.evaluate('window.__nonogram.session().canUndo()')) === false,
   `${painted} cells restored by 1 press, stack empty`,
 );
+
+// --- the same drag on touch (DOO-16) -----------------------------------------
+check(
+  'the canvas opts out of browser scroll, so a touch drag stays a gesture',
+  (await page.evaluate("getComputedStyle(document.getElementById('scene')).touchAction")) === 'none',
+  `#scene touch-action: ${await page.evaluate("getComputedStyle(document.getElementById('scene')).touchAction")}`,
+);
+
+await page.call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+await blankBoard();
+const beforeTouch = await page.evaluate('Array.from(window.__nonogram.session().state).join("")');
+await touchDrag(sweepPath(140, 35));
+const afterTouch = await page.evaluate('Array.from(window.__nonogram.session().state).join("")');
+const touchPainted = [...afterTouch].filter((v, i) => v !== beforeTouch[i]).length;
+check(
+  'a touch drag paints the same cells a mouse drag does',
+  touchPainted >= 3,
+  `${touchPainted}/${beforeTouch.length} cells filled by one finger`,
+);
+
+await page.evaluate("document.getElementById('undo').click()");
+await sleep(150);
+check(
+  'one undo press takes the touch stroke back',
+  (await page.evaluate('Array.from(window.__nonogram.session().state).join("")')) === beforeTouch &&
+    (await page.evaluate('window.__nonogram.session().canUndo()')) === false,
+  `${touchPainted} cells restored by 1 press, stack empty`,
+);
+// Off again before the rest of the run: emulation flips the pointer media queries, and
+// the layout checks below were written against the desktop branch of them.
+await page.call('Emulation.setTouchEmulationEnabled', { enabled: false });
 
 // Back to rotate and back to the board the checks below expect.
 await page.evaluate("document.getElementById('btn-mode').click()");
