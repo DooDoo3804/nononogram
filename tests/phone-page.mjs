@@ -31,6 +31,10 @@ export function phonePageHtml({ config, runnerSrc = './phone-runner.js' } = {}) 
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>no-nonogram — 폰 성능 측정 (DOO-12)</title>
+<!-- With no icon declared the browser asks the *origin root* for /favicon.ico, which on a
+     static host is a 404 nobody can intercept — landing as an error in the phone's console,
+     the one place a tester is told to look. An empty data: URL suppresses the request. -->
+<link rel="icon" href="data:," />
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #16130d; color: #ecdfc0;

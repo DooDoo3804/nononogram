@@ -219,10 +219,20 @@ try {
   const errors = page.errors().filter((e) => !/favicon/i.test(e));
   list.check('no console errors', errors.length === 0, errors.slice(0, 3).join(' / ') || 'clean');
 
-  // The deploy is a static artifact; a phone on a hotel wifi should not need anything
-  // but the host it was opened from.
-  const external = page.externalRequests(liveUrl ?? `http://127.0.0.1:${mode === 'lan' ? LAN_PORT : PORT}`);
-  list.check('no external requests', external.length === 0, external.slice(0, 3).join(' ') || 'self-contained');
+  // The deploy is a static artifact; a phone on a hotel wifi should not need anything but
+  // the origin it was opened from. Compared against the *origin*, not the page's own
+  // directory — the artifact legitimately reaches up to ../bench/ and /assets/, and a
+  // deploy under a subpath would otherwise flag its own files as third-party.
+  const external = page.externalRequests(new URL(base).origin);
+  list.check('no off-origin requests', external.length === 0, external.slice(0, 3).join(' ') || 'self-contained');
+
+  // A page whose instructions are "look at the errors" must not manufacture one. With no
+  // icon declared the browser hits the origin root for /favicon.ico, which a static host
+  // answers with a 404 that nothing in the artifact can intercept.
+  // `externalRequests` filters by prefix, so an unmatchable prefix yields every request —
+  // the favicon hit can be same-origin or not depending on where the page is deployed.
+  const favicons = page.externalRequests('about:').filter((u) => /favicon/i.test(u));
+  list.check('no favicon 404 on the phone', favicons.length === 0, favicons.join(' ') || 'icon declared inline');
 
   const shot = await page.screenshot();
   await mkdir(OUT_DIR, { recursive: true });
