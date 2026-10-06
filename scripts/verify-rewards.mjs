@@ -29,11 +29,12 @@ const OUT = process.argv[3] ?? 'rewards-out';
 mkdirSync(OUT, { recursive: true });
 const { check, report } = checklist();
 
-// A port of its own: the platform gate also uses CDP, and `launchChrome` will happily
-// attach to whatever is already listening on the default port — which on a shared
-// machine means inheriting that run's profile *and its seeded progress*, so every
-// unlock check would see a fully-cleared game.
-const browser = await launchChrome({ offline: true, port: 9444 });
+// This gate's browser must be its own: the platform gate also uses CDP, and attaching to
+// a browser another run started would inherit that run's profile *and its seeded
+// progress*, so every unlock check would see a fully-cleared game. It is now structural
+// rather than a `port: 9444` request that `launchChrome` quietly ignored — the transport
+// is a private pipe to a browser with a throwaway profile, with no port to share (DOO-37).
+const browser = await launchChrome({ offline: true });
 const page = await browser.newPage();
 const shot = async (name) => writeFileSync(join(OUT, `${name}.png`), await page.screenshot());
 
