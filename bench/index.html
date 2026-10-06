@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>no-nonogram — 렌더 벤치</title>
+    <style>
+      /* Self-contained on purpose: style.css belongs to the UI track and this page
+         must not drag the game's layout into a perf measurement. */
+      html, body { margin: 0; height: 100%; background: #ecdfc0; color: #2c2417; }
+      body { display: grid; grid-template-rows: 1fr auto; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      #scene { display: block; width: 100%; height: 100%; touch-action: none; }
+      #report { max-height: 42vh; overflow: auto; padding: 8px 10px; background: #2c2417; color: #ecdfc0; white-space: pre; }
+      #report b { color: #e8c37a; }
+    </style>
+    <script type="module" crossorigin src="../assets/bench-aEv3TprA.js"></script>
+    <link rel="modulepreload" crossorigin href="../assets/three-DtrD1gYx.js">
+    <link rel="modulepreload" crossorigin href="../assets/puzzle-w_AExPGk.js">
+  </head>
+  <body>
+    <canvas id="scene"></canvas>
+    <pre id="report">starting…</pre>
+  </body>
+</html>
