@@ -3491,3 +3491,139 @@ C의 적합도가 높은 이유를 한 줄로: **검증이 없는 바로 그 구
 
 규칙을 결과 보기 전에 적어 두는 이유는, 결함 T가 **결과를 보고 설명을 고른** 사례였기
 때문이다.
+
+---
+
+## 27. 최종 측정 — 게이트 전부 그린, 그러나 프로브는 **버그를 재현하지 못했다** (결함 U)
+
+체인이 06:39:36에 전부 끝났다. 5·6·7단계 결과를 전부 받았다.
+
+### 27.1 §23.1을 정정한다 — `[rail]`은 **존재한다. 다른 파일에**
+
+§23.1은 "`rail`은 로그에도 소스에도 없는 문자열"이라고 적었다. **틀렸다.**
+`finish4.sh`가 **`finish.log`에** 찍는다:
+
+```
+    [rail] 'unfixed' check lines: 24 (expect 24; 0 => pre-fix harness, numbers void)
+    [rail] per-puzzle rows:       24 (expect 24)
+```
+
+| 파일 | `rail` 출현 |
+|---|---|
+| `finish.log` | **4줄** (두 런 × 2줄) |
+| `play-desktop-fixed.log` | 0 |
+| `play-mobile.log` | 0 |
+
+**결함 O는 그대로 성립한다 — 이유만 바뀐다.** §22.6은 **틀린 파일**을 지목했다
+(`play-desktop-fixed.log`에서 찾으라고 했는데 그 줄은 `finish.log`에 있다). 지시를
+글자대로 따르면 여전히 0이 나오고 여전히 "무효"로 읽힌다. 결론(멀쩡한 측정을 버릴 뻔)은
+같고, **내가 적은 원인 설명이 틀렸다.** 정정한다.
+
+그리고 실제 `finish.log`의 그 줄은 **24/24로 정상**이다 — 고정 하네스가 맞다는
+§23.1의 결론은 독립 지표(어서션 레이블 24줄)로도, 이 줄로도 확인된다.
+
+### 27.2 합격선 3종 — **전부 PASS** (`verdict5.log`, rev5)
+
+| 게이트 | 분류 | 근거 |
+|---|---|---|
+| `eslint` | **PASS** (silent, rc=0) | 무출력 + rc=0 |
+| `vitest` | **PASS** rc=0 | **22 파일 / 553 테스트 전부 통과** |
+| `npm run build` | **PASS** rc=0 | `✓ built in 673ms`, `dist/` 산출 (three 480.58 kB → gzip 121.51 kB) |
+| `mistake-count` | **PASS** rc=0 | 12/12 |
+
+**독립 재확인** — rev5가 5초 만에 끝난 게 수상해서 직접 다시 돌렸다:
+`npx vitest run` → `Test Files 22 passed (22) / Tests 553 passed (553) / Duration 2.10s`,
+`real 2.96s`. **5초는 정상이다** (순수 유닛 테스트, 브라우저 없음). 게이트는 진짜다.
+
+### 27.3 데스크톱 레일 최종 — 24행, 22 완주, 콘솔 에러 0
+
+| 항목 | 값 |
+|---|---|
+| 퍼즐 행 | **24/24** |
+| `solved=true` | **22** |
+| `solved=false` | **2** — `l4-train`, `l4-castle` |
+| 고정 하네스 레이블 | **24** (= 행 수) |
+| 콘솔 에러 | **0** (`no console errors across the whole run`) |
+| 집계 줄 | ` FAIL  desktop: all 24 puzzles finished with real input  — 22/24` |
+
+### 27.4 §26.5의 예측 — **적중. `stranded` 지표는 4/4다**
+
+규칙을 결과 보기 전에 고정해 뒀다(§26.5). `l4-cat` 결과:
+
+```
+  ok   desktop l4-cat: the correction pass left no reachable cell wrong — 0 unfixed after 2 corrective clicks: []
+  l4-cat  6x6x6  need=112  111 clicks + 2 fix  solved=true  stranded=0 missed=0 wrong=0  115s
+```
+
+`solved=true` ⇒ **예측 적중**. 구 로그 실패 4건의 최종 대조표:
+
+| 퍼즐 | 구 `stranded` | D 해당? | 고정 하네스 | 예측 |
+|---|---|---|---|---|
+| `l3-bird` | 2 | ✅ | **통과** | ✅ |
+| `l3-rocket` | 2 | ✅ | **통과** | ✅ |
+| `l4-cat` | 8 | ✅ | **통과** | ✅ |
+| `l4-train` | **0** | ❌ | **실패(동일 숫자)** | ✅ |
+
+> **4/4.** `stranded>0`인 행은 전부 뒤집혔고, `stranded=0`인 행은 뒤집히지 않았다.
+> §22.3의 결론은 3건에 대해 옳았고 `l4-train` 1건에 대해 틀렸으며(결함 T),
+> **그 판별은 재측정 없이 구 로그만으로 가능했다.**
+
+### 27.5 프로브 — 7/9 통과, 그러나 **실패를 재현하지 못했다**
+
+```
+  ok   cell 119: a non-fresh re-open did not inherit a cleared save — stored solved=false, session solved=false
+  ok   cell 119: the recorded pixel's topmost element is the canvas — elementFromPoint(206,718) = <canvas id=scene>
+  ok   cell 119: the acts left its layer on the board — peel depth 0, record wanted 0
+  ok   cell 119: 2 real taps at the recorded pixel cleared it — state 1 -> 0; [[119:1→2],[119:2→0]]
+  ok   cell 124: a non-fresh re-open did not inherit a cleared save — stored solved=false, session solved=false
+ FAIL  cell 124: the recorded pixel's topmost element is the canvas — elementFromPoint(207,510) = <div>
+  ok   cell 124: the acts left its layer on the board — peel depth 0, record wanted 0
+ FAIL  cell 124: 2 real taps at the recorded pixel cleared it — state 1 -> 2; [[124:1→2],[]]
+```
+
+**두 `FAIL`을 제품 결함으로 읽으면 안 된다.** 가린 요소는 `<div class="fx-clear">` —
+**클리어 축하 오버레이**다(`fx/celebrate.js:57`). 그리고 그건 기본이 `hidden`이고
+(`celebrate.js:58`, `.fx-clear[hidden]{display:none}` — `fx/styles.js:182`) **퍼즐이 풀렸을
+때만** 열린다(`celebrate.js:302` `overlay.hidden=false` → `fx-clear--on`).
+
+#### 결함 U — 프로브가 **탭을 끝낸 뒤의 화면**으로 후보 B를 판정한다 (고정 포맷)
+
+| | |
+|---|---|
+| **재현 절차** | `tests/probe-l3bird-unfixed.mjs` — `:257-264`에서 2탭을 모두 끝내고, **`:266` `const after = await snapshot(...)`**, 그 `after`에서 `:276-277` `topAt`·`overCanvas`를 꺼내 `:290` 후보 B 어서션에 쓴다 |
+| **기대** | "이 픽셀은 캔버스가 받을 픽셀인가"를 **탭이 들어가야 할 시점**에 묻는다 |
+| **실제** | **탭을 다 쓴 뒤에** 묻는다. 프로브 자신의 탭이 보드를 풀어 버리면 축하 오버레이가 열리고, 그 오버레이를 "셀을 가리는 `div`"로 보고한다 |
+| **스크린샷 대신** | `probe-l3bird-unfixed.mjs:266` vs `:290`. 그리고 `out/l3bird-unfixed.json`의 `topAt: {"tag":"DIV","cls":"fx-clear"}` |
+
+**산술로 확인된다.** 프로브 셋업은 `34 solution cells + 2 extra FILLED`(119·124), `solved=false`.
+프로브는 119를 먼저 처리해 `1→2→0`으로 **비웠다**. 그 시점 보드 = 정답 34칸 FILLED +
+124만 여분 FILLED ⇒ 아직 안 풀림. 이어서 124에 1탭 → `1→2`(MARKED). **MARKED는 FILLED가
+아니므로 그 순간 보드는 풀린 상태가 된다** ⇒ 축하 오버레이 열림 ⇒ **2번째 탭이 삼켜진다**
+(`taps[1].movedCells = []`). 관측과 정확히 일치한다.
+
+#### 그래서 후보 판정은 이렇게 된다
+
+| 후보 | 프로브 결과 | 해석 |
+|---|---|---|
+| A 입력 잠금 | 두 셀 모두 `ok` — `storedSolved=false, sessionSolved=false` | 프로브 조건에서는 **반증** |
+| B 오버레이 | cell 124 `FAIL` | **무효 — 측정 시점이 틀렸다(결함 U).** 가린 것은 정상 동작인 축하 오버레이 |
+| C 레이어 소실 | 두 셀 모두 `ok` — `peel depth 0 == record wanted 0` | 프로브 조건에서는 **반증** |
+
+**그리고 결정적으로, 프로브는 버그를 재현하지 못했다:**
+
+| | 플레이 런 (실패) | 프로브 |
+|---|---|---|
+| cell 119 최종 상태 | **1 (FILLED)** — 12탭이 못 움직임 | **0 (BLANK)** — 2탭에 깨끗이 비워짐 |
+| cell 124 최종 상태 | **1 (FILLED)** | 2 (MARKED) — 1탭은 **들어갔다** |
+| 보드 | `solved=false` (축하 없음) | 풀림 → 축하 열림 |
+
+플레이 런에서 두 셀은 **FILLED에서 한 칸도 못 움직였다**. 프로브에서는 **움직였다.**
+조건이 다르다. ⇒ **A·C의 "반증"도 약하다** — 버그가 안 난 시나리오에서 셀이 멀쩡하다는
+것만 보였을 뿐, 버그가 난 시나리오에서 A·C가 원인이 아니었음을 보인 게 아니다.
+
+> **결함 L의 근본 원인은 여전히 미확정이다.** 프로브는 **무효(inconclusive)**이고,
+> 보정 패스의 실제 조건(카메라·줌·필 상태를 그대로 복원한 뒤 측정)을 재생하는
+> 프로브가 따로 필요하다. 그리고 B를 제대로 묻는다면 **탭 전에** 물어야 한다.
+
+**이것이 F·H·I·J·K·M·N·O·R·U — 열 번째다.** 이번엔 *원인을 확정하려고 만든 도구*가
+같은 과(科)였다. 하마터면 **정상 동작인 축하 오버레이를 릴리스 차단 사유로 올릴 뻔했다.**
