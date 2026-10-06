@@ -10,6 +10,7 @@
 //   .onFrameEnd(cb)           cb() right after renderer.render(). -> unsubscribe fn
 //   .start() / .stop()        drive / halt the requestAnimationFrame loop
 //   .facingAxis()             'x'|'y'|'z' — the axis the camera looks most along
+//   .facing()                 { axis, sign } — that axis, plus which end is nearest
 //   .rayFrom(event)           a Raycaster aimed at the pointer event
 //   .dispose()
 //
@@ -260,6 +261,20 @@ export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO, fitMargin 
     return ax >= ay && ax >= az ? 'x' : ay >= az ? 'y' : 'z';
   }
 
+  /**
+   * The facing axis plus which end of it the camera is on.
+   *
+   * `sign` is the sign of the view *direction* along that axis, so `-1` means the
+   * camera looks towards decreasing coordinates and the high layers are the near ones.
+   * render/peel.js needs both halves: the axis says which way to slice, the sign says
+   * which end to take the slices off. Allocates, unlike `facingAxis()`, which runs
+   * every frame — this one runs on a keypress.
+   */
+  function facing() {
+    const axis = facingAxis(); // also refreshes viewDir
+    return { axis, sign: viewDir[axis] < 0 ? -1 : 1 };
+  }
+
   function rayFrom(event) {
     const rect = canvas.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -287,6 +302,7 @@ export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO, fitMargin 
     pixelRatio: () => renderer.getPixelRatio(),
     frameCamera,
     facingAxis,
+    facing,
     rayFrom,
     onFrame(cb) {
       frameCbs.add(cb);
