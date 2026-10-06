@@ -90,6 +90,28 @@
 // OrbitControls' damping make that a renderer-internals question — but a cue that is
 // missing or stuck is a cue that cannot orient anyone, and both of those are visible
 // from the outside.
+//
+// ## Two false alarms this file produced, and what they cost
+//
+// Both of its first two red runs were the harness, not the product, and both failed in
+// a shape worth recognising next time:
+//
+//   12 reds   `expectedShape()` guessed the clue table's shape from geometry instead of
+//             reading the data contract. Every failure was a clean transpose with the
+//             right cell count, and X was never among them. Wrong-oracle signature.
+//   28 reds   `show()` demanded `.clue-panel--shown` at every width, but past the wide
+//             floor that class sits on the facing axis alone and visibility comes from
+//             the media query's `display: block`. Desktop-only, one check, two of three
+//             axes per box. Wrong-layout signature.
+//
+// The second was the more expensive of the two, and not because of the red: `show()`
+// returning false made the run `continue` past the legibility reads, so the desktop
+// viewport reported **no** font, contrast or clipping numbers for two axes of every box
+// — 28 reds standing in front of 84 measurements that silently never happened. A
+// failing precondition that skips the measurement it guards is worse than one that
+// fails loudly on its own, because the checklist still looks like it covered the
+// viewport. That is the same shape as the two `playtest.mjs` defects in §15.2 of the
+// DOO-8 report: the quiet direction is the dangerous one.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -215,13 +237,30 @@ const PROBE = `(() => {
   return {
     wide: window.matchMedia('(min-width: 980px) and (min-height: 750px)').matches,
 
-    /** Open one axis's table the way a player does — by clicking its tab. */
+    /**
+     * Bring one axis's table on screen the way a player would, and report whether it is
+     * actually readable there.
+     *
+     * The two layouts make a table visible by different means, and conflating them was
+     * this file's second false alarm (see the header's "two false alarms"). Narrow: one
+     * panel at a time, selected by its tab, visibility carried by the clue-panel--shown
+     * class (display: grid). Wide: the tab bar is display:none and *all three* panels
+     * are display:block from the media query, while --shown stays on the facing axis
+     * alone. So --shown is the right question only when the tabs exist; past the wide
+     * floor the right question is whether the panel has a box and some numbers in it.
+     */
     show(axis) {
+      const tabs = document.getElementById('clue-tabs');
       const tab = document.getElementById('clue-tab-' + axis);
       const panel = document.getElementById('clue-panel-' + axis);
-      if (tab && getComputedStyle(document.getElementById('clue-tabs')).display !== 'none') tab.click();
-      return !!panel && getComputedStyle(panel).display !== 'none'
-        && panel.classList.contains('clue-panel--shown');
+      if (!panel) return false;
+      const tabbed = tabs && getComputedStyle(tabs).display !== 'none';
+      if (tabbed && tab) tab.click();
+
+      const r = panel.getBoundingClientRect();
+      const visible = getComputedStyle(panel).display !== 'none' && r.width > 0 && r.height > 0;
+      const populated = panel.querySelectorAll('.clue-cell').length > 0;
+      return visible && populated && (!tabbed || panel.classList.contains('clue-panel--shown'));
     },
 
     /** Which axis currently carries the orientation highlight, if any. */
@@ -231,9 +270,10 @@ const PROBE = `(() => {
       return null;
     },
 
-    orbit(fraction) {
+    /** dx of one clientHeight is a full turn of azimuth; dy tilts, clamped by OrbitControls. */
+    orbit(fx, fy = 0) {
       const r = canvas.getBoundingClientRect();
-      orbitBy(fraction * r.height, 0);
+      orbitBy(fx * r.height, fy * r.height);
     },
 
     /** Every clue number in one axis's table, measured. */
@@ -428,19 +468,37 @@ try {
     const biggest = [...bySize.values()].at(-1);
     await openPuzzle(page, biggest);
     await page.evaluate(`window.__clue = ${PROBE}`);
+    // Eight azimuths, then four tilts. Both bands are needed and the reason is the one
+    // that nearly became a third false alarm: azimuth-only rotation holds the elevation
+    // where `frameCamera` left it, so the facing axis can only ever alternate between
+    // the two horizontal axes — a run with `dy = 0` throughout reports `x/z` and never
+    // `y` on every viewport, which reads exactly like "the Y table is never selected"
+    // and is really "the sweep never looked down". Tilting is what asks whether Y can
+    // carry the cue at all, and it has to, or the Y table never auto-selects for the
+    // one camera angle where it is the table you want.
     const seen = [];
     for (let i = 0; i < 8; i++) {
       await page.evaluate(`window.__clue.orbit(${i / 8})`);
       await sleep(260); // damping; this is a cue-liveness read, not a timing measurement
       seen.push(await page.evaluate('window.__clue.activeAxis()'));
     }
-    const nulls = seen.filter((a) => a === null).length;
+    const tilted = [];
+    for (const fy of [0.25, 0.4, -0.25, -0.4]) {
+      await page.evaluate(`window.__clue.orbit(0, ${fy})`);
+      await sleep(260);
+      tilted.push(await page.evaluate('window.__clue.activeAxis()'));
+    }
+    const all = [...seen, ...tilted];
+    const nulls = all.filter((a) => a === null).length;
     const distinct = new Set(seen.filter(Boolean));
-    check(`[orient] ${vp.label}: an axis cue is on screen at every azimuth`, nulls === 0,
-      `${8 - nulls}/8 azimuths highlighted, saw ${[...distinct].join('/') || 'none'}`);
+    const everAxis = new Set(all.filter(Boolean));
+    check(`[orient] ${vp.label}: an axis cue is on screen at every camera angle`, nulls === 0,
+      `${all.length - nulls}/${all.length} angles highlighted, saw ${[...everAxis].join('/') || 'none'}`);
     check(`[orient] ${vp.label}: the cue tracks rotation (not frozen on one axis)`, distinct.size >= 2,
       `${distinct.size} distinct over a full turn: ${seen.join(',')}`);
-    results.push({ viewport: vp.label, orient: { seen, nulls, distinct: [...distinct] } });
+    check(`[orient] ${vp.label}: every axis can carry the cue, Y included`, everAxis.size === 3,
+      `azimuth gave ${[...distinct].join('/')}, tilting added ${tilted.join(',')}`);
+    results.push({ viewport: vp.label, orient: { seen, tilted, nulls, distinct: [...distinct], everAxis: [...everAxis] } });
   }
 
   writeFileSync(join(OUT, 'clue-legibility.json'), JSON.stringify({ results, checks }, null, 2));
