@@ -263,6 +263,40 @@ body {
 .tag-btn:hover { transform: scale(1.05); }
 .tag-btn:active { transform: scale(0.95); }
 
+/* --- top-band actions ---------------------------------------------------------- */
+.band-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* Rotate vs paint. A drag has to mean one thing at a time, so the mode is an
+   explicit, always-visible switch rather than something inferred from where the
+   drag started — guessing is what produces "I meant to rotate and filled a cell". */
+.mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0 0.9rem;
+  border-radius: 999px;
+  border: 2px solid var(--gold);
+  background: linear-gradient(135deg, var(--paper), var(--paper-deep));
+  color: var(--ink);
+  font-family: system-ui, sans-serif;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.4);
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.mode-btn__icon { font-size: 1rem; line-height: 1; }
+.mode-btn:active { transform: scale(0.97); }
+.mode-btn[aria-pressed='true'] {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: #fff0c8;
+}
+
 /* --- parchment play area ------------------------------------------------------
    Written narrow-first, which is the whole fix for DOO-13/DOO-18. The old rules were
    one layout at every size: `#board` was a three-column grid, the two side panels were
@@ -462,6 +496,13 @@ body {
   cursor: pointer;
 }
 
+/* The cursor is the mode's main feedback on desktop, where there is no thumb to
+   watch — click-to-rotate vs crosshair-to-paint. `data-mode`/`data-painting` are
+   written on `#board` by ui/gestures.js. */
+#board[data-mode='paint'] #scene { cursor: crosshair; }
+/* A paint drag crossing a clue table would otherwise start selecting its numbers. */
+#board[data-painting='1'] { user-select: none; }
+
 /* --- landscape: stand the chrome up on its side -------------------------------
    A landscape phone is the portrait bug mirrored. It has width to spare and none of
    the height everything above wants: two horizontal bands plus a clue table over the
@@ -490,6 +531,13 @@ body {
   .puzzle-info { flex-direction: column; align-items: center; gap: 0.4rem; text-align: center; }
   .puzzle-info > * { font-size: 0.7rem; }
   #status { margin: 0; font-size: 0.7rem; text-align: center; }
+
+  /* A 56px rail has no room for a pill with a word in it, so the switch becomes the
+     same 44px circle as its neighbour and carries the icon alone. The label survives
+     in `aria-label`, which ui/hud.js writes on every mode change. */
+  .band-actions { flex-direction: column; gap: 0.5rem; }
+  .mode-btn { width: 44px; padding: 0; justify-content: center; }
+  .mode-btn__text { display: none; }
   /* `.fx-row--end` pushes the hint/mute pair to the far end with `margin-left: auto`,
      which in a column is the wrong axis. The ID keeps this above fx/styles.js, which is
      injected at mount and so lands after this file. */

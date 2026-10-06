@@ -229,8 +229,21 @@ mountMenu({ levels, getProgress, onOpenPuzzle, show }) -> {
   renderLevels(), openLevel(level), reopenCurrentLevel(),
 }
 mountClues() -> { render(dims, clues, currentRuns), setActiveAxis(axis) }
-mountHud({ onUndo }) -> { setStatus(text), setDims(text) }
+mountHud({ onUndo, onToggleMode }) -> { setStatus(text), setDims(text), setMode(mode, opts) }
+mountGestures({ canvas, view, getSession, getGrid, onModeChange }) -> {
+  mode(), setMode(mode), toggleMode(), dispose(),
+}
 ```
+
+캔버스 포인터 입력은 **전부** `ui/gestures.js`에 있다 — 탭·롱프레스·드래그·핀치를 한
+곳에서 판정한다. `main.js`에 인라인 핸들러를 두지 말 것: DOO-16이 그렇게 생겼다.
+`main.js`의 핸들러는 `pointerup`만 들었고 `pointermove`가 없어서, 드래그 칠하기가
+앱에 아예 없었다 — `state/session.js`의 스트로크 API와 그 19개 테스트가 호출자 없이
+떠 있었던 이유다.
+
+한 손가락 드래그는 회전과 칠하기 둘 다 원하므로 모드를 명시적으로 나눈다
+(`#btn-mode`, `P`, Shift 홀드). 드래그가 시작된 위치로 추측하지 않는다 — 6³에서는
+큐브가 화면을 덮어 회전이 거의 불가능해진다.
 
 ## 무회귀 보증 대상
 
@@ -240,7 +253,9 @@ mountHud({ onUndo }) -> { setStatus(text), setDims(text) }
 - 2D 아이소 썸네일, 퍼즐 카드 진행 배지
 - 축 기즈모
 - 되돌리기
-- 드래그 vs 클릭 5px 임계값 (OrbitControls와 클릭 토글의 공존)
+- 드래그 vs 탭 8px 임계값 (OrbitControls와 셀 토글의 공존). 임계값은
+  `ui/gestures.js`의 `SLOP`을 import해서 쓴다 — 사본이 갈라지지 않도록
+- 칠하기 모드 전환(`#btn-mode`) → 드래그 연속 채움 → **되돌리기 1회로 스트로크 전체**
 - 바라보는 축 클루 패널 하이라이트
 - 서드파티 JS/CSS 요청 0건 (unpkg 제거 증명)
 - 첫 화면 2초 예산, 60fps

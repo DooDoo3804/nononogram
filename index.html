@@ -64,7 +64,18 @@
         <div class="puzzle-info">
           <span id="dims-label" class="dims"></span>
         </div>
-        <button id="btn-game-back" class="tag-btn" title="메뉴로">☰</button>
+        <div class="band-actions">
+          <!-- A one-finger drag has to mean exactly one thing, so rotate-vs-paint is an
+               explicit switch rather than something guessed from where the drag began
+               (ui/gestures.js explains why guessing fails on a 6³ board). Desktop also
+               has `P` and hold-Shift; this button is the only way in on touch. -->
+          <button id="btn-mode" class="mode-btn" type="button" aria-pressed="false"
+                  title="칠하기 모드 (P) — 끌어서 연속 채움">
+            <span class="mode-btn__icon" aria-hidden="true">✥</span>
+            <span class="mode-btn__text">회전</span>
+          </button>
+          <button id="btn-game-back" class="tag-btn" type="button" title="메뉴로" aria-label="메뉴로 돌아가기">☰</button>
+        </div>
       </header>
 
       <div id="board">

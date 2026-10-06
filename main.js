@@ -16,6 +16,7 @@ import { mountScreens } from './ui/screens.js';
 import { mountMenu } from './ui/menu.js';
 import { mountClues } from './ui/clues.js';
 import { mountHud } from './ui/hud.js';
+import { mountGestures } from './ui/gestures.js';
 import { mountRewards } from './fx/index.js';
 
 const SOLVED_TEXT = 'Solved! 🎉';
@@ -40,7 +41,10 @@ let openedAPuzzle = false;
 
 const screens = mountScreens();
 const clues = mountClues();
-const hud = mountHud({ onUndo: () => session?.undo() });
+const hud = mountHud({
+  onUndo: () => session?.undo(),
+  onToggleMode: () => gestures.toggleMode(),
+});
 const menu = mountMenu({
   levels: LEVELS,
   getProgress: loadProgress,
@@ -114,23 +118,18 @@ function openPuzzle(spec) {
 }
 
 // --- pointer input -------------------------------------------------------------
-// OrbitControls also listens for pointerdown/up on the canvas to rotate the camera,
-// so only treat this as a click (toggle a cell) when the pointer barely moved.
-const DRAG_THRESHOLD = 5;
-let downX = 0;
-let downY = 0;
-
-canvas.addEventListener('pointerdown', (event) => {
-  downX = event.clientX;
-  downY = event.clientY;
+// All of it lives in ui/gestures.js: tap vs long press vs drag vs pinch is one
+// decision, and splitting it across main.js and a module is how DOO-16 happened — the
+// inline handler that used to be here was pointerup-only, so the paint drag the module
+// implements (and DOO-10's grouped undo exists for) was unreachable.
+const gestures = mountGestures({
+  canvas,
+  view,
+  getSession: () => session,
+  getGrid: () => grid,
+  onModeChange: (mode, opts) => hud.setMode(mode, opts),
 });
-
-canvas.addEventListener('pointerup', (event) => {
-  if (Math.hypot(event.clientX - downX, event.clientY - downY) >= DRAG_THRESHOLD) return;
-  if (!session || session.solved) return;
-  const i = grid.pick(view.rayFrom(event));
-  if (i !== null) session.cycle(i);
-});
+hud.setMode(gestures.mode());
 
 // --- navigation ----------------------------------------------------------------
 
@@ -168,6 +167,10 @@ window.__nonogram = {
   perfReset: () => perf.reset(),
   grid: () => grid?.stats() ?? null,
   session: () => session,
+  // Read-only on purpose: the harness clicks `#btn-mode` like a player does, and reads
+  // this to assert the click landed. A `setMode` here would let a test pass while the
+  // button it is meant to prove stayed broken.
+  mode: () => gestures.mode(),
   levels: () =>
     LEVELS.map((level) => ({
       id: level.id,

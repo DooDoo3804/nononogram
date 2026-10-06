@@ -17,6 +17,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { join } from 'node:path';
 import { launchChrome, checklist } from './cdp.mjs';
+// The tap/drag threshold the app actually ships, so the check below names the real
+// number instead of a copy that can drift away from it.
+import { SLOP } from '../ui/gestures.js';
 
 const BASE = process.argv[2] ?? 'http://127.0.0.1:4173';
 const OUT = process.argv[3] ?? 'verify-out';
@@ -132,18 +135,45 @@ check(
   `${before.replace(/0/g, '').length} -> ${afterClick.replace(/0/g, '').length} non-blank`,
 );
 
-// A drag must rotate the camera instead of toggling a cell (5px threshold).
+// In rotate mode (the default) a drag must rotate the camera instead of toggling a
+// cell. `ui/gestures.js` measures the furthest the pointer ever strayed, not the
+// down-to-up distance, so a rotation that loops back to its start is still a drag.
+// `path` is [dx, dy] offsets from the centre of the canvas. The press is always at the
+// centre, which for a paint drag matters: a stroke that starts off the board never opens,
+// so the gesture layer is right to paint nothing.
+const drag = async (path) => {
+  const steps = [['mousePressed', [0, 0]], ...path.map((p) => ['mouseMoved', p]), ['mouseReleased', path.at(-1)]];
+  for (const [type, [dx, dy]] of steps) {
+    await page.call('Input.dispatchMouseEvent', {
+      type, x: box.x + dx, y: box.y + dy, button: 'left', clickCount: 1,
+      buttons: type === 'mouseReleased' ? 0 : 1, pointerType: 'mouse',
+    });
+    await sleep(40);
+  }
+  await sleep(200);
+};
+
+/**
+ * A boustrophedon sweep over a 2*reach square centred on the press, in `step`-px moves.
+ *
+ * Three rows rather than one line, and `step` small enough that consecutive samples land
+ * on neighbouring cells: a single horizontal line across a 3×3×2 board only ever crosses
+ * two of them, which is a thin number to rest a "fills every cell it crosses" claim on.
+ */
+const sweepPath = (reach, step) => {
+  const path = [];
+  const xs = [];
+  for (let dx = -reach; dx <= reach; dx += step) xs.push(dx);
+  for (const [row, dy] of [-reach, 0, reach].entries()) {
+    for (const dx of row % 2 ? [...xs].reverse() : xs) path.push([dx, dy]);
+  }
+  return path;
+};
+
 const afterClickState = afterClick;
-for (const [type, dx] of [['mousePressed', 0], ['mouseMoved', 40], ['mouseReleased', 40]]) {
-  await page.call('Input.dispatchMouseEvent', {
-    type, x: box.x + dx, y: box.y, button: 'left', clickCount: 1,
-    buttons: type === 'mouseReleased' ? 0 : 1, pointerType: 'mouse',
-  });
-  await sleep(60);
-}
-await sleep(200);
+await drag([[40, 0]]);
 check(
-  'a drag past the 5px threshold rotates instead of toggling',
+  `a drag past the ${SLOP}px slop rotates instead of toggling`,
   (await page.evaluate('Array.from(window.__nonogram.session().state).join("")')) === afterClickState,
 );
 await shot('5-after-click');
@@ -153,6 +183,68 @@ await shot('5-after-click');
 await page.evaluate("document.getElementById('undo').click()");
 await sleep(150);
 check('undo button restores the board', (await page.evaluate('Array.from(window.__nonogram.session().state).join("")')) === before);
+
+// --- paint drag: the path DOO-10's grouped undo exists for (DOO-16) ----------
+//
+// The regression this guards is a *wiring* one, which is why it has to be a real drag
+// in a real browser and not a unit test: `state/session.js` had the stroke API with 19
+// tests on it, `ui/gestures.js` had the drag, and the app still shipped with neither
+// reachable, because main.js' pointer handler listened only for pointerup. So click the
+// mode switch like a player does, drag across the board, and demand that *one* undo
+// press takes the whole stroke back.
+
+// A stroke's value is decided by the cell it starts on — from a filled cell it erases.
+// Blanking first makes this a fill, so every crossed cell is a visible change. Plain
+// `set()` is not undoable, so this does not touch the stack the check below measures.
+const blankBoard = async () => {
+  await page.evaluate(`(() => {
+    const s = window.__nonogram.session();
+    for (let i = 0; i < s.state.length; i++) s.set(i, 0);
+  })()`);
+  await sleep(120);
+};
+await blankBoard();
+
+await page.evaluate("document.getElementById('btn-mode').click()");
+await sleep(80);
+check(
+  'the mode switch reaches paint mode',
+  (await page.evaluate('window.__nonogram.mode()')) === 'paint' &&
+    (await page.evaluate("document.getElementById('btn-mode').getAttribute('aria-pressed')")) === 'true',
+  '#btn-mode -> paint, aria-pressed=true',
+);
+
+const beforePaint = await page.evaluate('Array.from(window.__nonogram.session().state).join("")');
+await drag(sweepPath(140, 35));
+const afterPaint = await page.evaluate('Array.from(window.__nonogram.session().state).join("")');
+const painted = [...afterPaint].filter((v, i) => v !== beforePaint[i]).length;
+// More than one cell is the whole claim: before DOO-16 this drag painted zero, and the
+// single-cell case is what the app already did on a tap.
+check(
+  'a paint drag fills every cell it crosses',
+  painted >= 3,
+  `${painted}/${beforePaint.length} cells filled by one drag`,
+);
+
+await page.evaluate("document.getElementById('undo').click()");
+await sleep(150);
+check(
+  'one undo press takes the whole stroke back',
+  (await page.evaluate('Array.from(window.__nonogram.session().state).join("")')) === beforePaint &&
+    (await page.evaluate('window.__nonogram.session().canUndo()')) === false,
+  `${painted} cells restored by 1 press, stack empty`,
+);
+
+// Back to rotate and back to the board the checks below expect.
+await page.evaluate("document.getElementById('btn-mode').click()");
+await sleep(80);
+check('the switch goes back to rotate', (await page.evaluate('window.__nonogram.mode()')) === 'rotate');
+await page.evaluate(`(() => {
+  const s = window.__nonogram.session();
+  const want = ${JSON.stringify(before)};
+  for (let i = 0; i < s.state.length; i++) s.set(i, Number(want[i]));
+})()`);
+await sleep(120);
 
 // --- persistence: write progress, reload, confirm it comes back ----------
 
