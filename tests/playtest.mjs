@@ -1475,7 +1475,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
 
   // Before any verdict reads `solved`: this clear came from real input and not from the
   // harness's own probe. Without it, the three checks below are satisfiable by a bug in
-  // this file (DOO-36).
+  // this file — they were, until DOO-35 was traced to `latchGuard`/`unwind`.
   check(
     `${platform.label} ${entry.id}: no probe latched solved mid-playthrough`,
     probeLatches.length === 0,
