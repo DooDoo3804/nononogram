@@ -16,9 +16,21 @@
   --accent: #d9a441;
   --accent-deep: #c98f2e;
 
-  --axis-x: #b5533f;
-  --axis-y: #5f8a52;
-  --axis-z: #4a6fa5;
+  /* X/Y/Z. These three live in four places — here, the hand-expanded `rgba()` tab
+     gradients further down this file, `AXIS_COLORS` in render/gizmo.js, and the
+     axis sprites it draws. Change one, change all four, and run
+     `npx vitest run tests/axis-colors.test.js` (DOO-11's guard) — a drifted pair is
+     two shades of one hue, 1.3:1 apart, which no screenshot will show you (DOO-23).
+
+     Dark, not the original brighter triad, for contrast on parchment: the old
+     --axis-y #5f8a52 measured 3.03:1 on --paper and 2.89:1 once the active panel's
+     own 0.12 tint sat under the dot — i.e. already under the 3:1 non-text bar on the
+     one panel we highlight. These three are 4.73-5.11:1 on --paper, 4.35:1 worst
+     case on a tinted panel. X/Y/Z is also spelled out in text beside every dot, so
+     hue is never the only channel carrying which axis this is. */
+  --axis-x: #9e3f2c;
+  --axis-y: #436a39;
+  --axis-z: #3d5c8c;
 
   --font-display: "Playfair Display", Georgia, serif;
 }
@@ -424,9 +436,9 @@ body {
    different axis. The board is below the panel in portrait and beside it in landscape,
    never above, so here the stripe is on the bottom edge whichever axis it is; the wide
    query re-points all three at their own side. */
-.clue-panel--shown.clue-panel--active { box-shadow: inset 0 -3px 0 var(--axis-y); background: linear-gradient(0deg, rgba(95, 138, 82, 0.12), rgba(255,255,255,0.25) 45%); }
-.clue-panel--left.clue-panel--shown.clue-panel--active { box-shadow: inset 0 -3px 0 var(--axis-x); background: linear-gradient(0deg, rgba(181, 83, 63, 0.12), rgba(255,255,255,0.25) 45%); }
-.clue-panel--right.clue-panel--shown.clue-panel--active { box-shadow: inset 0 -3px 0 var(--axis-z); background: linear-gradient(0deg, rgba(74, 111, 165, 0.12), rgba(255,255,255,0.25) 45%); }
+.clue-panel--shown.clue-panel--active { box-shadow: inset 0 -3px 0 var(--axis-y); background: linear-gradient(0deg, rgba(67, 106, 57, 0.12), rgba(255,255,255,0.25) 45%); }
+.clue-panel--left.clue-panel--shown.clue-panel--active { box-shadow: inset 0 -3px 0 var(--axis-x); background: linear-gradient(0deg, rgba(158, 63, 44, 0.12), rgba(255,255,255,0.25) 45%); }
+.clue-panel--right.clue-panel--shown.clue-panel--active { box-shadow: inset 0 -3px 0 var(--axis-z); background: linear-gradient(0deg, rgba(61, 92, 140, 0.12), rgba(255,255,255,0.25) 45%); }
 
 .clue-panel h2 {
   display: flex;
@@ -612,7 +624,7 @@ body {
   /* Three panels at once, each against its own side of the board, so the stripe goes
      back to the edge nearest the cube. Higher specificity than the narrow rules above
      because those are the unconditional defaults. */
-  .clue-panel--left.clue-panel--left.clue-panel--active { box-shadow: inset 3px 0 0 var(--axis-x); background: linear-gradient(90deg, rgba(181, 83, 63, 0.12), rgba(255,255,255,0.25) 45%); }
-  .clue-panel--top.clue-panel--top.clue-panel--active { box-shadow: inset 0 3px 0 var(--axis-y); background: linear-gradient(180deg, rgba(95, 138, 82, 0.12), rgba(255,255,255,0.25) 45%); }
-  .clue-panel--right.clue-panel--right.clue-panel--active { box-shadow: inset -3px 0 0 var(--axis-z); background: linear-gradient(270deg, rgba(74, 111, 165, 0.12), rgba(255,255,255,0.25) 45%); }
+  .clue-panel--left.clue-panel--left.clue-panel--active { box-shadow: inset 3px 0 0 var(--axis-x); background: linear-gradient(90deg, rgba(158, 63, 44, 0.12), rgba(255,255,255,0.25) 45%); }
+  .clue-panel--top.clue-panel--top.clue-panel--active { box-shadow: inset 0 3px 0 var(--axis-y); background: linear-gradient(180deg, rgba(67, 106, 57, 0.12), rgba(255,255,255,0.25) 45%); }
+  .clue-panel--right.clue-panel--right.clue-panel--active { box-shadow: inset -3px 0 0 var(--axis-z); background: linear-gradient(270deg, rgba(61, 92, 140, 0.12), rgba(255,255,255,0.25) 45%); }
 }
