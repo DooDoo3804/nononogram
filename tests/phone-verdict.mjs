@@ -203,12 +203,30 @@ export function judge(payload, rate) {
     });
   }
 
+  // Two things can make a run technically green and still not be the reading DOO-12
+  // asks for. They are collected rather than just printed, because the headline has to
+  // carry them: a screenshot of "✅ 통과" is what actually gets pasted into an issue, and
+  // nobody scrolls to an advisory line before believing it.
+  const disqualifiers = [];
+
+  // A shortened window is a fine smoke test and a worthless measurement.
+  if (payload.overrides?.length) {
+    disqualifiers.push('측정 파라미터가 기본값이 아님');
+    lines.push({
+      advisory: true,
+      name: '[참고] 측정 파라미터가 기본값이 아님 — 공식 수치로 쓸 수 없음',
+      pass: false,
+      detail: payload.overrides.join(', '),
+    });
+  }
+
   // An Android reading is the one the team pass line asks for. Anything else is worth
   // recording — a real mobile GPU and compositor is still far closer than a desktop
   // floor — but it must not be filed as the Android number, so it is called out here
   // rather than left for whoever reads the issue to notice from the UA string.
   const ua = payload.device?.ua ?? '';
   if (ua && !/Android/i.test(ua)) {
+    disqualifiers.push('안드로이드 기기가 아님');
     lines.push({
       advisory: true,
       name: '[참고] 안드로이드가 아닌 기기 — 합격선("중간 크기 안드로이드")의 판정으로는 쓸 수 없음',
@@ -217,7 +235,21 @@ export function judge(payload, rate) {
     });
   }
 
-  return { pass: lines.every((l) => l.advisory || l.pass), lines };
+  return {
+    pass: lines.every((l) => l.advisory || l.pass),
+    // `pass` says the numbers fit the budget. `official` says the run is the one the
+    // team pass line asks for. Both have to be true before this closes DOO-12.
+    official: disqualifiers.length === 0,
+    disqualifiers,
+    lines,
+  };
+}
+
+// The headline, in one place: the card, the markdown and any future reader of the saved
+// record should not each decide separately what a qualified pass looks like.
+export function verdictHeadline(verdict) {
+  if (!verdict.pass) return '❌ 예산 초과';
+  return verdict.official ? '✅ 통과' : '⚠️ 예산 내 — 공식 판정 아님';
 }
 
 // The full record, assembled identically on both routes. `nowIso` and the environment
@@ -286,7 +318,14 @@ export function reportMarkdown(record) {
 
   out.push(`## DOO-12 실기 측정 — ${d.model ?? '기종 미확인'}`);
   out.push('');
-  out.push(`**판정: ${v.pass ? '✅ 통과' : '❌ 예산 초과'}**`);
+  out.push(`**판정: ${verdictHeadline(v)}**`);
+  if (v.disqualifiers?.length) {
+    out.push('');
+    out.push(
+      `> 이 측정은 합격선 판정으로 쓸 수 없습니다 — ${v.disqualifiers.join(', ')}. ` +
+        '수치는 참고용입니다.',
+    );
+  }
   out.push('');
   out.push('| 항목 | | 상세 |');
   out.push('|---|---|---|');

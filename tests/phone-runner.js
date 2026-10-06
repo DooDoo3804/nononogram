@@ -16,9 +16,36 @@
 // the full viewport, so it renders at the device's real resolution, through query params
 // and the `window.__bench` contract that `scripts/bench-render.mjs` already uses.
 
-import { buildRecord, reportMarkdown } from './phone-verdict.mjs';
+import { buildRecord, reportMarkdown, verdictHeadline } from './phone-verdict.mjs';
 
-const CONFIG = window.__PHONE_BENCH__;
+// Query-param overrides, so the shipped artifact can be smoke-tested in seconds instead
+// of 90 — `tests/phone-verify-selfcheck.mjs` drives the deployed bytes rather than a
+// special fast build, which is the only way the self-check covers what a tester opens.
+//
+// Every override that fires is recorded and raises an advisory line on the card: a
+// 1-second window is a fine smoke test and a worthless measurement, and the way that
+// goes wrong is someone pasting one into the issue as the real reading.
+const OVERRIDABLE = {
+  suite: ['suite', String],
+  seconds: ['sec', Number],
+  passes: ['passes', Number],
+  sweepDims: ['sweepdims', String],
+  sweepSeconds: ['sweepsec', Number],
+  sweepSync: ['sweepsync', Number],
+};
+
+const CONFIG = { ...window.__PHONE_BENCH__ };
+const overrides = [];
+{
+  const params = new URLSearchParams(location.search);
+  for (const [key, [param, cast]] of Object.entries(OVERRIDABLE)) {
+    if (!params.has(param)) continue;
+    const value = cast(params.get(param));
+    if (typeof value === 'number' && !(value > 0)) continue;
+    overrides.push(`${param}=${value} (기본 ${CONFIG[key]})`);
+    CONFIG[key] = value;
+  }
+}
 
 const veil = document.getElementById('veil');
 const progress = document.getElementById('progress');
@@ -210,7 +237,11 @@ function show(record, markdown, saveNote) {
   veil.classList.add('hidden');
   card.classList.add('shown');
   card.innerHTML =
-    `<div class="big ${verdict.pass ? 'pass' : 'fail'}">${verdict.pass ? '✅ 통과' : '❌ 예산 초과'}</div>` +
+    `<div class="big ${verdict.pass ? (verdict.official ? 'pass' : 'warn') : 'fail'}">` +
+    `${verdictHeadline(verdict)}</div>` +
+    (verdict.disqualifiers?.length
+      ? `<div class="warn">이 측정은 합격선 판정으로 쓸 수 없습니다 — ${esc(verdict.disqualifiers.join(', '))}.</div>`
+      : '') +
     `<div class="meta">DOO-12 · ${esc(dev.model ?? '기종 미확인')} · ${esc(dev.platform)}` +
     `<br>${esc(dev.screen)} @ dpr ${dev.dpr} → ${esc(dev.pixels)}px · ${dev.refreshHz}Hz 화면` +
     `<br>코어 ${dev.cores ?? '?'} · 메모리 ${dev.memoryGb ?? '?'}GB · ${esc(dev.network ?? '?')}` +
@@ -289,7 +320,7 @@ function show(record, markdown, saveNote) {
     sweep = [];
   }
 
-  const payload = { device: dev, passes, capSweep: sweep, tainted, config: CONFIG };
+  const payload = { device: dev, passes, capSweep: sweep, tainted, config: CONFIG, overrides };
   const record = buildRecord(payload, {
     measuredAt: new Date().toISOString(),
     commit: CONFIG.commit ?? null,
