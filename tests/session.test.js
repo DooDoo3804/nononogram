@@ -6,7 +6,7 @@ import { setStorage, saveProgress } from '../state/progress.js';
 import { LEVELS, solutionFor } from '../levels.js';
 import { FILLED as CELLS_FILLED } from '../state/cells.js';
 
-const SPEC = LEVELS[0].puzzles[0]; // l1-1, 3x3x3
+const SPEC = LEVELS[0].puzzles[0]; // the catalogue's first level-1 puzzle
 
 function memoryStorage() {
   const map = new Map();
@@ -189,7 +189,7 @@ describe('persistence', () => {
     saveProgress(SPEC.id, new Uint8Array(8).fill(FILLED), false);
     const s = createSession(SPEC);
     expect(s.restored).toBe(false);
-    expect(s.state.length).toBe(27);
+    expect(s.state.length).toBe(SPEC.dims.x * SPEC.dims.y * SPEC.dims.z);
     expect([...s.state].every((v) => v === BLANK)).toBe(true);
   });
 });

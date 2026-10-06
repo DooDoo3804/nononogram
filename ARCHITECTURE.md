@@ -30,13 +30,17 @@ main.js  → 위 셋을 아는 유일한 파일. 배선만. 로직 금지.
 
 ### `levels.js` — 퍼즐 카탈로그 (퍼즐 트랙의 유일한 교체 지점)
 ```js
-LEVELS            // [{ id, name, puzzles: [{ id, dims, seed }] }]
+LEVELS            // [{ id, name, level, box, puzzles: [spec] }]
+                  // spec = { id, name, level, dims, cells, tags }
 solutionFor(spec) // -> Uint8Array, 길이 x*y*z, 값 0|1. 결정적(같은 spec → 같은 셀)
 cellCount(dims)   // -> number
 findLevel(id) / findPuzzle(id)
 ```
-손으로 만든 모양으로 바꿀 때 **`solutionFor`와 퍼즐 스펙만** 고치면 된다. 앱의 나머지는
-"해가 어떻게 만들어지는지"를 모른다.
+DOO-4 이후 `levels.js`는 **아무것도 생성하지 않는다**. 24개 퍼즐 전부 `shapes/index.js`의
+손으로 만든 보셀 모양이고, `solutionFor`는 생성기가 아니라 조회다(복사본을 돌려주므로
+세션이 카탈로그를 더럽힐 수 없다). 레벨은 모양의 `level` 필드에서, 레벨 안의 순서는
+카탈로그 순서(= 난이도 오름차순)에서 그대로 나온다. 퍼즐 id = 모양 id.
+앱의 나머지는 "해가 어떻게 만들어지는지"를 모른다.
 
 ### `state/cells.js` — 셀 상태 (의존성 0)
 ```js

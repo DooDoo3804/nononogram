@@ -10,7 +10,7 @@
 // through `repairShape` to get a minimal fix.
 
 import { describe, it, expect } from 'vitest';
-import { SHAPES, shapesByLevel } from '../shapes/index.js';
+import { LEVEL_BOX as SHAPE_LEVEL_BOX, SHAPES, shapesByLevel } from '../shapes/index.js';
 import { validatePuzzle, UNKNOWN, solveLogical } from '../solver.js';
 import { shapeToAscii } from '../shapes/format.js';
 import { idx } from '../puzzle.js';
@@ -19,7 +19,16 @@ import { LEVELS, solutionFor } from '../levels.js';
 // The difficulty curve is L1 3³ -> L2 4³ -> L3 5³ -> L4 6³, with non-cubic boxes
 // allowed as variants inside a level. A level's budget is therefore its longest edge:
 // a 5×4×3 box is a level-3 shape even though it holds fewer cells than a 4³ one.
-const LEVEL_BOX = { 1: 3, 2: 4, 3: 5, 4: 6 };
+// Imported rather than redeclared so the gate and the catalogue cannot disagree.
+const LEVEL_BOX = SHAPE_LEVEL_BOX;
+
+// The definition of done: 24 shapes over 4 levels.
+const EXPECTED_SHAPES = 24;
+const EXPECTED_LEVELS = [1, 2, 3, 4];
+const PER_LEVEL = EXPECTED_SHAPES / EXPECTED_LEVELS.length;
+
+const scoreOf = (shape) => validatePuzzle(shape.dims, shape.cells).difficulty;
+const isCube = (d) => d.x === d.y && d.y === d.z;
 
 function describeFailure(shape, v) {
   const { grid } = solveLogical(shape.dims, v.clues);
@@ -95,27 +104,45 @@ describe('shape catalogue gate', () => {
   });
 });
 
-// The catalogue the game actually ships. Today `solutionFor` is still the seeded
-// random generator, which does NOT guarantee uniqueness — roughly 1% of random grids
-// at these sizes have a second solution (exhaustively measured: 2,616 of the 262,144
-// grids in a 3x3x2 box). All 12 current seeds happen to be clean, and this gate is
-// what keeps it that way: add a puzzle whose seed lands on an ambiguous grid, or swap
-// in a hand-authored shape that is not uniquely solvable, and CI stops you here.
+// The catalogue the game actually ships. Since DOO-4 this is the same 24 hand-authored
+// shapes, reached through levels.js rather than from shapes/index.js directly — so this
+// block is what proves the *seam* is sound, not just the shape data. A `solutionFor`
+// that drifts back to generating grids, or a spec wired to the wrong shape, fails here:
+// the seeded random generator it replaced could not guarantee uniqueness (roughly 1% of
+// random grids at these sizes have a second solution — exhaustively measured, 2,616 of
+// the 262,144 grids in a 3x3x2 box).
 describe('shipped puzzle catalogue gate', () => {
   const allPuzzles = LEVELS.flatMap((level) => level.puzzles.map((spec) => [spec.id, spec]));
 
-  it('has puzzles to check', () => {
-    expect(allPuzzles.length).toBeGreaterThan(0);
+  it('ships every catalogue shape, and nothing else', () => {
+    expect(allPuzzles.length).toBe(SHAPES.length);
+    expect(allPuzzles.map(([id]) => id).sort()).toEqual(SHAPES.map((s) => s.id).sort());
+  });
+
+  it('gives every shipped puzzle the name the celebration needs', () => {
+    // state/shape-name.js reads `spec.name` first; without it the clear screen falls
+    // back to the puzzle id, which is not something to show a player.
+    for (const [id, spec] of allPuzzles) {
+      expect(spec.name, `${id} has no name`).toBeTruthy();
+      expect(spec.name, `${id} is still named after its id`).not.toBe(spec.id);
+    }
+  });
+
+  it('hands out a copy, so a session cannot corrupt the catalogue', () => {
+    const [, spec] = allPuzzles[0];
+    const first = solutionFor(spec);
+    first[0] ^= 1;
+    expect(Array.from(solutionFor(spec))).toEqual(Array.from(spec.cells));
   });
 
   it.each(allPuzzles)('%s is uniquely solvable without guessing', (_id, spec) => {
     const cells = solutionFor(spec);
     const v = validatePuzzle(spec.dims, cells);
     const message = [
-      `puzzle "${spec.id}" (seed ${spec.seed}) failed the gate: ${v.reason}`,
+      `puzzle "${spec.id}" (${spec.name}) failed the gate: ${v.reason}`,
       `  dims=${spec.dims.x}x${spec.dims.y}x${spec.dims.z} filled=${v.filled}`,
       `  unique=${v.unique} noGuess=${v.noGuess} solutions=${v.solutions} unknownCells=${v.unknown}`,
-      '  fix: change the seed, or replace this entry with a hand-authored shape from shapes/.',
+      '  fix: repair the shape in shapes/index.js — see `node shapes/report.mjs --repair`.',
     ].join('\n');
     expect(v.pass, message).toBe(true);
   });
@@ -128,37 +155,130 @@ describe('shipped puzzle catalogue gate', () => {
   });
 });
 
+// The shape of the catalogue itself — "24 hand-made shapes over 4 levels, covering
+// 3³/4³/5³/6³ plus non-cubic variants" is the definition of done, so it is a test.
+describe('catalogue composition', () => {
+  it(`holds exactly ${EXPECTED_SHAPES} shapes, ${PER_LEVEL} per level`, () => {
+    expect(SHAPES.length).toBe(EXPECTED_SHAPES);
+    for (const level of EXPECTED_LEVELS) {
+      const n = shapesByLevel(level).length;
+      expect(n, `L${level} has ${n} shapes, expected ${PER_LEVEL}`).toBe(PER_LEVEL);
+    }
+  });
+
+  it('gives every shape a human name distinct from its id', () => {
+    for (const shape of SHAPES) {
+      expect(shape.name, `${shape.id} has no name`).toBeTruthy();
+      expect(shape.name, `${shape.id} is still named after its id`).not.toBe(shape.id);
+    }
+    const names = SHAPES.map((s) => s.name);
+    expect(new Set(names).size, `duplicate names: ${names.join(', ')}`).toBe(names.length);
+  });
+
+  it.each(EXPECTED_LEVELS)('L%i covers its full cube and at least one non-cubic box', (level) => {
+    const box = LEVEL_BOX[level];
+    const shapes = shapesByLevel(level);
+    const cubes = shapes.filter((s) => isCube(s.dims) && s.dims.x === box);
+    const others = shapes.filter((s) => !isCube(s.dims));
+    expect(cubes.length, `L${level} has no ${box}³ shape`).toBeGreaterThan(0);
+    expect(others.length, `L${level} has no non-cubic variant`).toBeGreaterThan(0);
+  });
+
+  it('reaches the level box on some axis in every level', () => {
+    // Guards the curve from the other side: a level whose shapes all sit well inside
+    // their box is really the previous level wearing a bigger label.
+    for (const level of EXPECTED_LEVELS) {
+      const box = LEVEL_BOX[level];
+      const longest = Math.max(...shapesByLevel(level).map((s) => Math.max(s.dims.x, s.dims.y, s.dims.z)));
+      expect(longest, `L${level}'s biggest box is ${longest}, expected ${box}`).toBe(box);
+    }
+  });
+
+  it('leaves no z-plane of a shape completely empty', () => {
+    // A shape padded out with blank slices is a flat relief in a bigger box, not a
+    // 3D shape — the player would be deducing emptiness, not a silhouette.
+    for (const shape of SHAPES) {
+      for (let z = 0; z < shape.dims.z; z++) {
+        let filled = 0;
+        for (let x = 0; x < shape.dims.x; x++)
+          for (let y = 0; y < shape.dims.y; y++) filled += shape.cells[idx(shape.dims, x, y, z)];
+        expect(filled, `${shape.id} slice z=${z} is empty:\n${shapeToAscii(shape.dims, shape.cells)}`)
+          .toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
 describe('difficulty curve', () => {
+  // Measured once; every assertion below reads these.
+  const byLevel = EXPECTED_LEVELS.filter((l) => shapesByLevel(l).length > 0).map((level) => {
+    const d = shapesByLevel(level).map(scoreOf);
+    const scores = d.map((x) => x.score);
+    const waves = d.map((x) => x.rounds);
+    const mean = (a) => a.reduce((p, c) => p + c, 0) / a.length;
+    return {
+      level, scores, waves,
+      avg: mean(scores), min: Math.min(...scores), max: Math.max(...scores),
+      avgWaves: mean(waves),
+    };
+  });
+
   it('reports a score for every shape', () => {
     for (const shape of SHAPES) {
-      const d = validatePuzzle(shape.dims, shape.cells).difficulty;
+      const d = scoreOf(shape);
       expect(d.score).toBeGreaterThan(0);
       expect(d.steps).toBeGreaterThan(0);
       expect(d.rounds).toBeGreaterThanOrEqual(1);
     }
   });
 
-  it('increases monotonically from level to level', () => {
-    const levels = [1, 2, 3, 4].filter((l) => shapesByLevel(l).length > 0);
-    const averages = levels.map((level) => {
-      const scores = shapesByLevel(level).map((s) => validatePuzzle(s.dims, s.cells).difficulty.score);
-      return { level, avg: scores.reduce((a, b) => a + b, 0) / scores.length, scores };
-    });
-
-    for (let i = 1; i < averages.length; i++) {
-      const prev = averages[i - 1];
-      const cur = averages[i];
+  // Three separate monotonicity claims. The mean is the one DOO-4 promises; min and max
+  // moving together are what stop a level from being "harder on average" only because
+  // one monster shape drags the mean up.
+  it.each(['avg', 'min', 'max'])('has a monotonically increasing %s score per level', (key) => {
+    for (let i = 1; i < byLevel.length; i++) {
+      const prev = byLevel[i - 1];
+      const cur = byLevel[i];
       expect(
-        cur.avg,
-        `L${cur.level} average ${cur.avg.toFixed(1)} (${cur.scores}) must exceed ` +
-          `L${prev.level} average ${prev.avg.toFixed(1)} (${prev.scores})`,
-      ).toBeGreaterThan(prev.avg);
+        cur[key],
+        `L${cur.level} ${key} ${cur[key].toFixed(1)} (${cur.scores}) must exceed ` +
+          `L${prev.level} ${key} ${prev[key].toFixed(1)} (${prev.scores})`,
+      ).toBeGreaterThan(prev[key]);
+    }
+  });
+
+  it('deepens the reasoning, not just the board size', () => {
+    // Score grows with board size on its own, so a curve can be monotone while every
+    // puzzle stays a one-glance read. Mean waves rising is the claim that later levels
+    // actually require chained cross-axis deduction.
+    for (let i = 1; i < byLevel.length; i++) {
+      const prev = byLevel[i - 1];
+      const cur = byLevel[i];
+      expect(
+        cur.avgWaves,
+        `L${cur.level} mean waves ${cur.avgWaves.toFixed(2)} (${cur.waves}) must exceed ` +
+          `L${prev.level} mean waves ${prev.avgWaves.toFixed(2)} (${prev.waves})`,
+      ).toBeGreaterThan(prev.avgWaves);
+    }
+  });
+
+  it('orders each level easiest-first — catalogue order is play order', () => {
+    for (const level of EXPECTED_LEVELS) {
+      const shapes = shapesByLevel(level);
+      const scores = shapes.map((s) => scoreOf(s).score);
+      for (let i = 1; i < scores.length; i++) {
+        expect(
+          scores[i],
+          `L${level} is out of order at ${shapes[i].id}: ${scores.join(' -> ')} — ` +
+            'reorder SHAPES so the level reads easiest-first',
+        ).toBeGreaterThanOrEqual(scores[i - 1]);
+      }
     }
   });
 
   it('keeps level 1 shallow — one wave of reasoning, no chaining', () => {
     for (const shape of shapesByLevel(1)) {
-      const d = validatePuzzle(shape.dims, shape.cells).difficulty;
+      const d = scoreOf(shape);
       expect(d.rounds, `${shape.id} needs ${d.rounds} waves; level 1 should read off the clues`).toBeLessThanOrEqual(2);
     }
   });
