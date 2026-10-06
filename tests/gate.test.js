@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { LEVEL_BOX as SHAPE_LEVEL_BOX, SHAPES, shapesByLevel } from '../shapes/index.js';
-import { validatePuzzle, UNKNOWN, solveLogical } from '../solver.js';
+import { validatePuzzle, UNKNOWN, solveLogical, isConnected, coordsOf } from '../solver.js';
 import { shapeToAscii } from '../shapes/format.js';
 import { idx } from '../puzzle.js';
 import { LEVELS, solutionFor } from '../levels.js';
@@ -41,6 +41,33 @@ function describeFailure(shape, v) {
     `  first undecided cell indices: ${stuck.join(', ')}`,
     shapeToAscii(shape.dims, shape.cells),
   ].join('\n');
+}
+
+// Face-connected components of the filled cells, largest first. Written out here rather
+// than reusing the solver's `isConnected` so the gate's verdict is an independent flood
+// fill — and so a failure can name the floating voxels instead of just saying "false".
+function componentsOf(dims, cells) {
+  const total = dims.x * dims.y * dims.z;
+  const seen = new Uint8Array(total);
+  const steps = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  const comps = [];
+  for (let start = 0; start < total; start++) {
+    if (!cells[start] || seen[start]) continue;
+    const comp = [start];
+    const stack = [start];
+    seen[start] = 1;
+    while (stack.length) {
+      const [x, y, z] = coordsOf(dims, stack.pop());
+      for (const [dx, dy, dz] of steps) {
+        const nx = x + dx, ny = y + dy, nz = z + dz;
+        if (nx < 0 || ny < 0 || nz < 0 || nx >= dims.x || ny >= dims.y || nz >= dims.z) continue;
+        const ni = idx(dims, nx, ny, nz);
+        if (cells[ni] && !seen[ni]) { seen[ni] = 1; comp.push(ni); stack.push(ni); }
+      }
+    }
+    comps.push(comp);
+  }
+  return comps.sort((a, b) => b.length - a.length);
 }
 
 describe('shape catalogue gate', () => {
@@ -101,6 +128,64 @@ describe('shape catalogue gate', () => {
     const v = validatePuzzle(shape.dims, shape.cells);
     expect(v.filled).toBeGreaterThan(total * 0.05);
     expect(v.filled).toBeLessThan(total * 0.95);
+  });
+
+  // A shape in one face-connected piece. The solver happily proves a shape with a
+  // floating chunk unique and guess-free — DOO-15 found three that were, and all three
+  // were still unrecognisable: a crown whose middle jewel hung over the band, a
+  // locomotive whose chimney tip hovered above the boiler, a dog whose tail drifted a
+  // cell clear of its back. Nothing in the game explains that a voxel can hang in mid
+  // air, so "hand-made recognisable shape" means connected. If a future shape genuinely
+  // wants a detached piece, that intent belongs here as an explicit exception — the point
+  // of this gate is that silence can no longer mean "nobody noticed".
+  it.each(SHAPES.map((s) => [s.id, s]))('%s is a single connected piece', (_id, shape) => {
+    const { dims, cells } = shape;
+    const comps = componentsOf(dims, cells);
+    const strays = comps
+      .slice(1)
+      .map((c) => c.map((i) => `(${coordsOf(dims, i).join(',')})`).join(' '));
+    expect(
+      comps.length,
+      [
+        `shape "${shape.id}" (${shape.name}) is in ${comps.length} pieces ` +
+          `[${comps.map((c) => c.length).join(', ')}] — voxels are floating in mid air`,
+        ...strays.map((s, i) => `  stray piece ${i + 1}: ${s}`),
+        '  fix: attach them to the body, or move them onto it, and re-run `node shapes/report.mjs`.',
+        shapeToAscii(dims, cells),
+      ].join('\n'),
+    ).toBe(1);
+    // Cross-check: the solver's own connectivity test, which `repairShape` relies on to
+    // keep a repair from sprouting a floating voxel, must agree with the flood fill.
+    expect(isConnected(dims, cells)).toBe(true);
+  });
+
+  it('would catch a floating voxel', () => {
+    // The assertion above only earns its keep if it can fail. Take a real shape, sprout
+    // one voxel into empty space with no filled neighbour, and both detectors must say
+    // so — otherwise the gate has quietly become a no-op and every shape "passes".
+    let found = null;
+    outer: for (const shape of SHAPES) {
+      const { dims, cells } = shape;
+      for (let i = 0; i < cells.length && !found; i++) {
+        if (cells[i]) continue;
+        const [x, y, z] = coordsOf(dims, i);
+        const touches = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(
+          ([dx, dy, dz]) => {
+            const nx = x + dx, ny = y + dy, nz = z + dz;
+            if (nx < 0 || ny < 0 || nz < 0 || nx >= dims.x || ny >= dims.y || nz >= dims.z) return false;
+            return cells[idx(dims, nx, ny, nz)] === 1;
+          },
+        );
+        if (!touches) { found = { shape, i }; break outer; }
+      }
+    }
+    expect(found, 'no shape has an isolated empty cell to test with').not.toBeNull();
+
+    const { shape, i } = found;
+    const broken = Uint8Array.from(shape.cells);
+    broken[i] = 1;
+    expect(componentsOf(shape.dims, broken).length).toBe(2);
+    expect(isConnected(shape.dims, broken)).toBe(false);
   });
 });
 

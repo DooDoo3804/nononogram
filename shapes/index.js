@@ -343,27 +343,29 @@ export const l3Crown = defineShape({
   level: 3,
   tags: ['non-cubic'],
   slices: [
-    // Hollow band at y=0..1 around the whole rim; spikes at the four corners plus one
-    // taller spike at the middle of the front and back — that asymmetry is what makes
-    // this one need three waves of reasoning instead of one.
-    ['#...#',
-     '#...#',
+    // Hollow band at y=0..1 around the whole rim, with eight points rising off it:
+    // short ones (y=2) at the four corners and tall ones (y=2..3) at the middle of each
+    // side. Every point stands on the band — the middle point used to sit at the centre
+    // of the box, where the band does not reach, so it floated (DOO-15). All four faces
+    // now read the same '..#.. / #.#.# / ##### / #####' silhouette.
+    ['..#..',
+     '#.#.#',
      '#####',
      '#####'], // z = 0
     ['.....',
      '.....',
      '#...#',
      '#...#'], // z = 1
-    ['..#..',
-     '..#..',
+    ['#...#',
+     '#...#',
      '#...#',
      '#...#'], // z = 2
     ['.....',
      '.....',
      '#...#',
      '#...#'], // z = 3
-    ['#...#',
-     '#...#',
+    ['..#..',
+     '#.#.#',
      '#####',
      '#####'], // z = 4
   ],
@@ -477,18 +479,20 @@ export const l4Train = defineShape({
   slices: [
     // Boiler along the whole length, cab roof at the back, chimney at the front,
     // three wheels per side. The cab is one slice wider on z=2 than on z=1.
+    // The chimney is a two-cell stack standing on the boiler roof (y=3..4); its tip used
+    // to hang one cell clear of the boiler with nothing underneath it (DOO-15).
     ['......',
      '......',
      '######',
      '######',
      '.#.#.#'], // z = 0
     ['....#.',
-     '##....',
+     '##..#.',
      '######',
      '######',
      '.#.#.#'], // z = 1
     ['....#.',
-     '###...',
+     '###.#.',
      '######',
      '######',
      '.#.#.#'], // z = 2
@@ -508,7 +512,9 @@ export const l4Dog = defineShape({
   slices: [
     // Standing dog facing +x. Body spans the full depth; ear, snout and tail sit on
     // the inner two slices; the four legs are on the outer two, so they read as legs
-    // rather than as a pair of skirts.
+    // rather than as a pair of skirts. The back (y=3) runs the full length so the raised
+    // tail at x=0 joins it — x=1 used to be empty there, leaving the tail floating a cell
+    // clear of the body (DOO-15).
     ['......',
      '......',
      '.####.',
@@ -517,13 +523,13 @@ export const l4Dog = defineShape({
      '.#..#.'], // z = 0
     ['....#.',
      '#...##',
-     '#.####',
+     '######',
      '.####.',
      '......',
      '......'], // z = 1
     ['....#.',
      '#...##',
-     '#.####',
+     '######',
      '.####.',
      '......',
      '......'], // z = 2
