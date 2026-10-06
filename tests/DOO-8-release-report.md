@@ -3404,3 +3404,90 @@ C의 적합도가 높은 이유를 한 줄로: **검증이 없는 바로 그 구
 
 **두 플랫폼 모두 24/24가 아니다.** 다만 두 실패 모두 **원인 미확정**이고, 유력 후보(C)는
 하네스 쪽이다. 확정 전에 차단 여부를 선언하지 않는다.
+
+---
+
+## 26. 데스크톱 레일의 행을 **셋으로 가른다** — 실패 / 미지 / 거짓 소음
+
+22행 시점에 `solved=false`가 2건(`l4-train`·`l4-castle`) 나왔는데, **둘은 전혀 다른
+종류다**. 하네스가 그걸 가를 지표를 이미 찍어 두었다.
+
+### 26.1 이 런 전체에서 오염 지표가 켜진 행은 **딱 2개**다
+
+| 지표 | 켜진 행 |
+|---|---|
+| `unsettled > 0` (카메라/필 액트 미착지) | **`l4-castle` 1건뿐** — 런 전체에서 유일 |
+| `missed > 0` (보드를 탭 착지 전에 읽음 = 결함 Q) | **`l3-pyramid`(1), `l4-castle`(5)** — 2건뿐 |
+
+나머지 20행은 `unsettled=0` ∧ `missed=0`이다. 즉 **부하 오염은 2행에 국소화돼 있고**,
+그 2행이 정확히 새로 깨진 행들이다.
+
+### 26.2 `l4-castle`은 실패가 아니라 **미지(unknown)**다 — 하네스 자신의 규칙
+
+```
+ FAIL  desktop l4-castle: every camera move the map recorded was reproduced
+       — 1 unsettled: [{"step":"peel 4","act":"peel 4","detail":"key x4 -> depth 3/5 on z-"}]
+```
+
+**필 키를 4번 눌렀는데 깊이가 5 중 3에서 멈췄다.** 키 입력이 삼켜졌다는 뜻이고, 그
+다음부터 기록된 픽셀들은 **틀린 레이어**를 겨냥한다 — `missed=5`, `wrong=4`가 전부 그
+하류다.
+
+같은 퍼즐의 다른 두 측정:
+
+| 측정 | 결과 |
+|---|---|
+| **구 데스크톱** (pre-fix, 같은 플랫폼) | **통과** `115 clicks + 4 fix` 0/0/0, 156s |
+| **모바일** (post-fix) | **통과** `115 taps + 0 fix` 0/0/0, 165s |
+| 이번 고정 데스크톱 | **실패** `110 clicks + 19 fix`, `1 unsettled`, missed=5, wrong=4 |
+
+두 번 통과한 퍼즐이 **부하 지표가 켜진 런에서만** 깨졌다. 그리고 `playtest.mjs:78-80`이
+이 경우를 위해 쓰여 있다:
+
+> "A step that does not converge inside `maxFrames` is written to `perStep` with
+> `settled: false` and its raster is dropped from the maps — **an unsettled step is an
+> unknown, and an unknown must not be averaged into a release verdict.**"
+
+> **판정: `l4-castle`의 이번 행은 판정에 쓰지 않는다. 미지다.** 조용한 머신에서
+> 재측정해야 하고, 그때까지 **데스크톱 레일은 결론이 나지 않는다**(§26.4).
+
+### 26.3 `l4-train`은 반대다 — 오염 지표가 **전부 꺼져 있다**
+
+| 지표 | `l4-train` (고정 데스크톱) |
+|---|---|
+| `unsettled` | **0** (`ok`) |
+| `missed` | **0** |
+| `stranded` | 0 |
+| `every pixel aimed at is one a real click can reach` | `ok` |
+| pre-fix 하네스와 비교 | **69 clicks / 12 fix / wrong=2 — 숫자 동일** |
+
+부하 지표가 하나도 안 켜졌고, **다른 하네스 버전에서 같은 숫자가 나온다.** 이건
+재현되는 실패다. `l3-bird`(모바일)도 같다 — `unsettled=0`, `missed=0`, `stranded=0`.
+
+### 26.4 세 등급으로 정리한 데스크톱 22행
+
+| 등급 | 행 | 근거 |
+|---|---|---|
+| **A. 통과** | 20행 | `solved=true` ∧ `wrong=0` ∧ `unsettled=0` ∧ `missed=0` |
+| **B. 거짓 소음** (통과인데 `FAIL`) | `l3-pyramid` | 결함 Q — `missed=1`이나 `solved=true`, `wrong=0`, 그 셀이 보정 1클릭에 들어갔다 |
+| **C. 미지** (판정 불가) | `l4-castle` | 런 유일의 `unsettled`, 과거 2회 통과. 재측정 필요 |
+| **D. 실패** (재현됨) | `l4-train` | 오염 지표 전무, pre/post-fix 숫자 동일 |
+
+> **그래서 "데스크톱 N/24"를 지금 쓰면 안 된다.** 분자가 등급 C 때문에 확정되지
+> 않는다. 정직한 표기는 **"20 통과 / 1 거짓소음 / 1 미지 / 1 실패 (+ 2행 측정 중)"**이다.
+
+### 26.5 §25.3의 예측은 **아직 살아 있다** — 그러나 `l4-castle`이 교란 변수를 넣었다
+
+§25.3은 "`l4-cat`은 `stranded=8`이므로 고정 하네스에서 통과해야 한다"고 예측했다.
+`l4-cat`은 마지막 퍼즐이고 아직 측정 중이다. 다만 이번 런에 **부하 오염이 실재한다는
+것이 `l4-castle`로 입증**됐으므로, `l4-cat`이 실패해도 **그것만으로 예측이 틀렸다고
+할 수 없다** — 먼저 `unsettled`·`missed`를 봐야 한다. 예측의 판정 규칙을 미리 고정한다:
+
+| `l4-cat` 결과 | 예측 판정 |
+|---|---|
+| `solved=true` | 예측 **적중** |
+| `solved=false` ∧ `unsettled=0` ∧ `missed=0` | 예측 **반증** — `stranded` 지표를 버린다 |
+| `solved=false` ∧ (`unsettled>0` ∨ `missed>0`) | **미지** — 재측정 전까지 판정 보류 |
+
+규칙을 결과 보기 전에 적어 두는 이유는, 결함 T가 **결과를 보고 설명을 고른** 사례였기
+때문이다.
