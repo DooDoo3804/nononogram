@@ -1492,20 +1492,36 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
   // filled that the solution does not want. A player would spot that and click it back,
   // so the harness does too — and counts it, because "how many corrective taps did this
   // board cost" is a usability number, not noise to be hidden.
+  // Both directions, not just strays (report §17.11). The old filter was
+  //
+  //     v !== 0 && solution[i] !== 1          // a cell filled that the answer rejects
+  //
+  // which cannot see the mirror case: a cell the answer *wants*, left in MARKED by a
+  // stray tap that landed on it along the ray while it was already FILLED (1 -> 2). The
+  // group loop never rechecks it either, because it verifies a cell only in the group
+  // that aimed at it. So it survived to the verdict as "wrong" with nothing trying to
+  // fix it -- cell 62 of the 5x5x5 box did exactly this in *both* 5x5x5 puzzles of the
+  // 2026-10-07 desktop run, deterministically.
+  //
+  // The predicate is now the same one the verdict measures, so anything `wrong` counts
+  // is something the correction pass has tried to repair.
   let corrections = 0;
+  let converged = false;
   for (let round = 0; round < 3; round++) {
     const board = await page.evaluate('JSON.stringify(window.__qa.board())').then(JSON.parse);
-    const strays = board
-      .map((v, i) => ({ i, v }))
-      .filter(({ i, v }) => v !== 0 && solution[i] !== 1)
+    const off = board
+      .map((v, i) => ({ i, v, want: solution[i] === 1 ? 1 : 0 }))
+      .filter(({ v, want }) => (v === 1 ? 1 : 0) !== want)
       .filter(({ i }) => pixelByCell[i]);
-    if (!strays.length) break;
-    for (const { i, v } of strays) {
+    if (!off.length) { converged = true; break; }
+    for (const { i, v, want } of off) {
       const rec = pixelByCell[i];
       await openPuzzle(page, entry, { fresh: false });
       await applyActs(page, rec.acts, { platform, probe: false });
-      // FILLED -> MARKED -> BLANK is two taps; MARKED -> BLANK is one.
-      for (let n = 0; n < (v === 1 ? 2 : 1); n++) {
+      // The cycle is BLANK -> FILLED -> MARKED -> BLANK, so the number of taps that
+      // carries `v` to `want` is the distance around that ring.
+      const taps = ((want - v) % 3 + 3) % 3;
+      for (let n = 0; n < taps; n++) {
         await realTap(page, rec.px[0], rec.px[1], platform);
         corrections++;
         await settleTaps(page);
@@ -1516,6 +1532,18 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
   const solved = await page.evaluate('window.__qa.solved()');
   const board = await page.evaluate('JSON.stringify(window.__qa.board())').then(JSON.parse);
   const wrong = board.filter((v, i) => (v === 1) !== (solution[i] === 1)).length;
+
+  // Cells still wrong that the correction pass *could* aim at -- it tried and the board
+  // did not settle where it wanted. Kept apart from `stranded` (no pixel at all) because
+  // the two mean different things: stranded is "the map cannot reach this", unfixed is
+  // "real taps aimed here and the result kept moving". Rounds stay capped at 3 on
+  // purpose: `corrections` is the usability number this harness exists to report, and
+  // raising the cap to force a clear would hide exactly that.
+  const unfixed = board
+    .map((v, i) => ({ cell: i, v, want: solution[i] === 1 ? 1 : 0 }))
+    .filter(({ v, want }) => (v === 1 ? 1 : 0) !== want)
+    .filter(({ cell }) => pixelByCell[cell])
+    .map(({ cell, v, want }) => ({ cell, state: v, want }));
 
   // the clear celebration is the reward layer's completion signal
   const celebrated = await page.evaluate(
@@ -1534,6 +1562,8 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     probeLatches,
     offCanvas,
     unsettled,
+    unfixed,
+    correctionsConverged: converged,
     solved,
     wrongCells: wrong,
     celebrated,
@@ -1558,6 +1588,12 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     `${platform.label} ${entry.id}: every camera move the map recorded was reproduced`,
     unsettled.length === 0,
     `${unsettled.length} unsettled: ${JSON.stringify(unsettled.slice(0, 3))}`,
+  );
+  check(
+    `${platform.label} ${entry.id}: the correction pass left no reachable cell wrong`,
+    unfixed.length === 0,
+    `${unfixed.length} unfixed after ${corrections} corrective ` +
+      `${platform.touch ? 'taps' : 'clicks'}: ${JSON.stringify(unfixed.slice(0, 4))}`,
   );
   check(
     `${platform.label} ${entry.id}: finished with real ${platform.touch ? 'taps' : 'clicks'} only`,
