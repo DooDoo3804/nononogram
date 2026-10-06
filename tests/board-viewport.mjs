@@ -18,10 +18,13 @@
 //
 //   [ui]      the play-area layout — `style.css` has no `@media` query, so the board is
 //             a `1fr` column squeezed between two content-sized clue panels at every
-//             width. DOO-13.
+//             width. DOO-13. **Fixed** by DOO-18 (`f301c3b`); the checks stay as the
+//             regression guard.
 //   [render]  `render/scene.js` calls `renderer.setSize(w, h, false)` and never
 //             `setPixelRatio`, so the drawing buffer is CSS pixels: a 1x board on a 3x
-//             phone screen. Separate fix, separate owner.
+//             phone screen. Separate fix, separate owner. **Fixed** by DOO-19
+//             (`af5ea54`), which also capped the ratio — see SHIPPED_DPR_CAP below for
+//             why that moved this gate's pass line.
 //
 // ## Why this gate exists at all
 //
@@ -91,6 +94,27 @@ export const VIEWPORTS = [
 
 const FINGER_PX2 = 44 * 44; // 1936
 const MOUSE_PX2 = 24 * 24;  //  576
+
+// The retina cap shipped in `render/scene.js` (MAX_PIXEL_RATIO). The backing-store check
+// below asks for `min(dpr, cap)`, not `dpr`, and the difference is not cosmetic: DOO-19
+// priced the fill cost of the drawing buffer and capped the ratio at 2, so on a DPR
+// 2.625/3 phone a *correct* renderer draws at 2x. The first draft of this gate demanded
+// the full device ratio, which the cap makes unreachable by construction — it reported 56
+// failures that were the cap working as designed. `min()` keeps every bit of the defect
+// it was written to catch (drop `setPixelRatio` and all seven DPR>1 viewports read 1x,
+// missing the line) and adds one the old form could not express: a buffer *above* the cap,
+// i.e. someone raising it past what the fill-rate measurement bought.
+//
+// Hard-coded rather than imported from `render/scene.js`, for the same reason
+// `tests/phone-bench.mjs` hard-codes it: a gate that asks the renderer what ratio it chose
+// cannot notice the cap being quietly lowered. Changing the cap should break this file and
+// make someone re-read the measurement.
+const SHIPPED_DPR_CAP = 2;
+// Tolerance on the measured ratio. The slack needed is real but small: `scene.width` is a
+// rounded `getBoundingClientRect()` while three.js floors `clientWidth * ratio`, so the two
+// can disagree by ~1px — at the 200px board floor that is 2/200 = 0.01. 0.05 leaves 5x
+// headroom and still fails a 1x buffer on every retina viewport by a factor of 20.
+const DPR_TOLERANCE = 0.05;
 
 // Board box floors. 200 CSS px on the short side is the smallest square that can host
 // a 6-wide face at a hair over the mouse floor; 22% of the viewport is the share the
@@ -384,15 +408,18 @@ try {
       r.silhouette ? `${r.silhouette.width}x${r.silhouette.height}` : 'no tap anywhere reached a cell');
     check(`[ui] ${where}: median cell aperture >= ${MOUSE_PX2}px² (24x24, mouse floor)`,
       r.aperture.median >= MOUSE_PX2, `median=${r.aperture.median}px² over ${r.aperture.cells} cells`);
-    // Owned by the render track, not the layout: `render/scene.js` calls
-    // `renderer.setSize(w, h, false)` and never `setPixelRatio`, so the drawing buffer
-    // is CSS pixels on a 3x screen. A correct layout with a 1x buffer is still a blurry
-    // board, so the matrix reads it here — but it is a separate fix with a separate
-    // owner, hence a separate tag.
-    const backingOk = r.scene.width > 0 &&
-      Math.abs(r.backing.width / r.scene.width - r.dpr) < 0.35;
-    check(`[render] ${where}: canvas backing store matches its CSS box x DPR`, backingOk,
-      `${r.backing.width}x${r.backing.height} for ${r.scene.width}x${r.scene.height} @${r.dpr}`);
+    // Owned by the render track, not the layout: a correct layout with a 1x buffer is
+    // still a blurry board, so the matrix reads it here under its own tag. The expected
+    // ratio is the capped one — see SHIPPED_DPR_CAP.
+    const wantRatio = Math.min(r.dpr, SHIPPED_DPR_CAP);
+    const gotRatio = r.scene.width > 0 ? r.backing.width / r.scene.width : 0;
+    check(
+      `[render] ${where}: canvas backing store is CSS box x min(DPR, ${SHIPPED_DPR_CAP})`,
+      r.scene.width > 0 && Math.abs(gotRatio - wantRatio) < DPR_TOLERANCE,
+      `${r.backing.width}x${r.backing.height} for ${r.scene.width}x${r.scene.height} ` +
+        `→ ${gotRatio.toFixed(3)}x, want ${wantRatio.toFixed(3)}x (device @${r.dpr}` +
+        `${r.dpr > SHIPPED_DPR_CAP ? ', cap engaged' : ''})`,
+    );
   }
 
   // Finger-floor coverage is reported, not fatal: at 6³ it needs ~400 CSS px of board
@@ -421,12 +448,29 @@ try {
     }
   }
 
+  // Capping at `min(dpr, 2)` costs the DPR-1 desktop row its teeth — 1x is both the right
+  // answer and what a renderer that forgot `setPixelRatio` produces. So the matrix has to
+  // keep at least one viewport whose device ratio is *above* the cap and one at or below
+  // it: the first proves the cap is enforced, the second proves the ratio is still read
+  // from the device rather than pinned to a constant. Trimming VIEWPORTS down to DPR-1
+  // entries would otherwise make this whole tag unfalsifiable while still printing green.
+  const measured = results.filter((r) => r.scene.width > 0);
+  check(`[render] the matrix exercises the cap (some viewport has DPR > ${SHIPPED_DPR_CAP})`,
+    measured.some((r) => r.dpr > SHIPPED_DPR_CAP + DPR_TOLERANCE),
+    `device DPRs measured: ${[...new Set(measured.map((r) => r.dpr))].sort((a, b) => a - b).join(', ')}`);
+  check(`[render] the matrix also covers DPR <= ${SHIPPED_DPR_CAP}, where the cap is inert`,
+    measured.some((r) => r.dpr <= SHIPPED_DPR_CAP + DPR_TOLERANCE),
+    `device DPRs measured: ${[...new Set(measured.map((r) => r.dpr))].sort((a, b) => a - b).join(', ')}`);
+
   const errs = page.errors().filter((t) => !IGNORED_NOISE.test(t));
   check('[ui] no console errors across the whole matrix', errs.length === 0, errs.slice(0, 3).join(' | '));
 
   writeFileSync(join(OUT, 'board-viewport.json'), JSON.stringify({
     base: BASE,
-    thresholds: { MIN_SHORT_SIDE, MIN_VIEWPORT_SHARE, MOUSE_PX2, FINGER_PX2, RASTER_STEP },
+    thresholds: {
+      MIN_SHORT_SIDE, MIN_VIEWPORT_SHARE, MOUSE_PX2, FINGER_PX2, RASTER_STEP,
+      SHIPPED_DPR_CAP, DPR_TOLERANCE,
+    },
     results,
     checks,
   }, null, 2));
