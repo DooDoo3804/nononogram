@@ -11,7 +11,10 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "check": "npm run lint && npm test && npm run build"
+    "check": "npm run lint && npm test && npm run build",
+    "serve:dist": "vite preview --port 4173 --host 127.0.0.1",
+    "verify": "node scripts/verify-browser.mjs http://127.0.0.1:4173 verify-out",
+    "perf": "node scripts/bench-render.mjs http://127.0.0.1:4173 verify-out/bench.json"
   },
   "dependencies": {
     "three": "0.160.1"

@@ -28,6 +28,7 @@ const perf = createPerfMonitor(view.renderer, {
 let session = null;
 let grid = null;
 let gizmo = null;
+let openedAPuzzle = false;
 
 const screens = mountScreens();
 const clues = mountClues();
@@ -81,6 +82,14 @@ function openPuzzle(spec) {
 
   screens.show('screen-game');
   view.resize();
+
+  // Two milestones, because "first screen" is ambiguous: `first-frame` (recorded
+  // by perf itself) is when anything appears, `first-puzzle` is when the player
+  // can actually play. Both have to land inside the 2s budget.
+  if (!openedAPuzzle) {
+    openedAPuzzle = true;
+    perf.mark('first-puzzle');
+  }
 }
 
 // --- pointer input -------------------------------------------------------------
@@ -116,15 +125,31 @@ document.getElementById('btn-game-back').addEventListener('click', () => menu.re
 
 window.addEventListener('resize', () => view.resize());
 
+// perf brackets the whole frame — callbacks, controls and the draw call — so
+// `cpuMs` is the number with head room in it, not the vsync-capped frame gap.
 view.onFrame(() => {
-  perf.tick();
+  perf.beginFrame();
   clues.setActiveAxis(view.facingAxis());
 });
+view.onFrameEnd(() => perf.endFrame());
 view.start();
 
 // A read-only handle for QA / perf runs: `__nonogram.perf()` in the console.
+//
+// `levels()` is a slim projection of the catalogue (ids and dims, not the solutions).
+// `scripts/verify-browser.mjs` needs it to seed progress and reach the level-4 6³
+// boards, which the reward layer gates behind a score — without it the render gate
+// can only ever measure 3³.
 window.__nonogram = {
   perf: () => perf.stats(),
+  // Start a fresh measurement window — lets a harness separate steady-state
+  // gameplay from the one-off hitch of a screen transition.
+  perfReset: () => perf.reset(),
   grid: () => grid?.stats() ?? null,
   session: () => session,
+  levels: () =>
+    LEVELS.map((level) => ({
+      id: level.id,
+      puzzles: level.puzzles.map((spec) => ({ id: spec.id, dims: spec.dims })),
+    })),
 };

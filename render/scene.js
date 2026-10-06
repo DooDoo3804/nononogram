@@ -6,6 +6,7 @@
 //   .resize()                 match the renderer to the canvas' CSS box
 //   .frameCamera(dims)        place the camera to fit a dims-sized puzzle
 //   .onFrame(cb)              cb(dtMs) each frame, before render. -> unsubscribe fn
+//   .onFrameEnd(cb)           cb() right after renderer.render(). -> unsubscribe fn
 //   .start() / .stop()        drive / halt the requestAnimationFrame loop
 //   .facingAxis()             'x'|'y'|'z' — the axis the camera looks most along
 //   .rayFrom(event)           a Raycaster aimed at the pointer event
@@ -36,6 +37,9 @@ export function createView(canvas) {
   const viewDir = new THREE.Vector3();
 
   const frameCbs = new Set();
+  // Separate from frameCbs so the perf monitor can bracket the whole frame —
+  // callbacks, controls and the draw call — and read the CPU cost of one frame.
+  const frameEndCbs = new Set();
   let rafId = 0;
   let lastFrameAt = 0;
 
@@ -77,6 +81,7 @@ export function createView(canvas) {
     for (const cb of frameCbs) cb(dt);
     controls.update();
     renderer.render(scene, camera);
+    for (const cb of frameEndCbs) cb(dt);
   }
 
   return {
@@ -91,6 +96,10 @@ export function createView(canvas) {
     onFrame(cb) {
       frameCbs.add(cb);
       return () => frameCbs.delete(cb);
+    },
+    onFrameEnd(cb) {
+      frameEndCbs.add(cb);
+      return () => frameEndCbs.delete(cb);
     },
     start() {
       if (!rafId) rafId = requestAnimationFrame(tick);
