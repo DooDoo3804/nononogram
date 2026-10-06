@@ -1391,7 +1391,15 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
 
   // Group the needed cells by the sweep step that reaches them, so the camera moves
   // once per group instead of once per cell.
-  const pixelByCell = plan.pixelByCell ?? {};
+  //
+  // The *cursor* map, not the camera-only one (report §17.9). `plan.pixelByCell` holds
+  // only the cells reachable by camera work alone, which is the pre-DOO-17 gate; the
+  // depth cursor is what ships, and `plan.cursor.pixelByCell` is a strict superset of it
+  // with the same record shape (cursor-only cells carry `acts: [{kind:'peel', depth:N}]`,
+  // which `applyActs` already drives through `setPeelDepth`). Reading the narrow map made
+  // `play` strand exactly the cells the cursor exists to reach: every stranded cell in
+  // the 2026-10-07 desktop run was a member of `plan.unreachable`, set-for-set.
+  const pixelByCell = plan.cursor?.pixelByCell ?? plan.pixelByCell ?? {};
   const groups = new Map();
   const stranded = [];
   for (const cell of needed) {
@@ -1406,6 +1414,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
   const misses = [];
   const probeLatches = [];
   const offCanvas = [];
+  const unsettled = [];
 
   for (const [stepName, group] of groups) {
     // `fresh: false` is load-bearing: a fresh open drops the puzzle's saved board, which
@@ -1414,7 +1423,16 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     await openPuzzle(page, entry, { fresh: false });
     // `probe: false`: the settle poll is synthetic taps, and this board is holding the
     // progress of every group played before this one — see `settle()`.
-    await applyActs(page, group.acts, { platform, probe: false });
+    //
+    // The result is read rather than discarded: a `peel` act that lands on a different
+    // depth than the map recorded leaves the camera somewhere the recorded pixels do not
+    // describe, and every tap in the group then aims at the wrong cell. Discarding this
+    // is the shape of both §15.2 defects — a failure that stays quiet in the direction
+    // that flatters the verdict.
+    const applied = await applyActs(page, group.acts, { platform, probe: false });
+    for (const a of applied ?? []) {
+      if (a.settled === false) unsettled.push({ step: stepName, act: a.act, detail: a.detail ?? null });
+    }
 
     // Tap the whole group, then diff once. Reading the board after every tap doubles the
     // CDP round trips for a run that is already thousands of them; cells that did not
@@ -1515,6 +1533,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     misses,
     probeLatches,
     offCanvas,
+    unsettled,
     solved,
     wrongCells: wrong,
     celebrated,
@@ -1534,6 +1553,11 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     `${platform.label} ${entry.id}: every pixel aimed at is one a real click can reach`,
     offCanvas.length === 0,
     JSON.stringify(offCanvas.slice(0, 3)),
+  );
+  check(
+    `${platform.label} ${entry.id}: every camera move the map recorded was reproduced`,
+    unsettled.length === 0,
+    `${unsettled.length} unsettled: ${JSON.stringify(unsettled.slice(0, 3))}`,
   );
   check(
     `${platform.label} ${entry.id}: finished with real ${platform.touch ? 'taps' : 'clicks'} only`,
