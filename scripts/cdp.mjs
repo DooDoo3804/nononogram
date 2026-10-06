@@ -5,10 +5,11 @@
 // a perf gate that pulls puppeteer would add 150MB to a repo whose whole point is
 // that it builds and runs offline.
 //
-//   const browser = await launchChrome({ gl: 'metal', offline: true });
+//   const browser = await launchChrome({ gl: 'auto', offline: true });
 //   const page = await browser.newPage();
 //   await page.goto('http://127.0.0.1:4173/');
 //   const v = await page.evaluate('1 + 1');
+//   console.log(await page.glRenderer());   // never infer the backend from the flags
 //   await browser.close();
 
 import { spawn } from 'node:child_process';
@@ -28,6 +29,31 @@ export const CHROME_CANDIDATES = [
 function findChrome() {
   return process.env.CHROME_PATH ?? CHROME_CANDIDATES.find((path) => existsSync(path)) ?? null;
 }
+
+/**
+ * GL backend selection, and why the names matter (DOO-20).
+ *
+ * `auto` was documented for months as "software rasterization, reproducible on any
+ * machine". It is not. `--enable-unsafe-swiftshader` only *permits* a software
+ * fallback — Chrome still prefers the real GPU, and on this machine `auto` is
+ * byte-for-byte indistinguishable from passing no GL flags at all:
+ *
+ *   auto / --use-angle=metal / no flags  -> ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro)
+ *   software                             -> ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...))
+ *
+ * So `auto` means "whatever this box has", which is the right default for a
+ * regression gate (it measures the machine you are on) and the wrong thing to quote
+ * as a cross-machine floor. The flag is still worth keeping: on a GPU-less CI box
+ * Chrome refuses WebGL outright without it, so it buys the fallback, not the floor.
+ *
+ * Never describe a run's backend from its flags. Read `page.glRenderer()`.
+ */
+export const GL_FLAGS = {
+  // Use ANGLE, and allow the software fallback if there is no usable GPU.
+  auto: ['--use-gl=angle', '--enable-unsafe-swiftshader'],
+  // Force SwiftShader. Reproducible everywhere and slower at fill than any phone GPU.
+  software: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
+};
 
 function connection(ws) {
   let nextId = 1;
@@ -76,12 +102,16 @@ function connection(ws) {
  * @param {object} opts
  * @param {boolean} [opts.offline]  map every host except 127.0.0.1 to NOTFOUND, so a
  *                                  passing run also proves the app needs no CDN
- * @param {string[]} [opts.gpuFlags] GL flags; defaults to software rasterization,
- *                                  which is reproducible on any machine and CI box
+ * @param {keyof GL_FLAGS} [opts.gl] which backend to ask for — 'auto' (default, the
+ *                                  machine's own GPU) or 'software' (forced
+ *                                  SwiftShader). See GL_FLAGS; the request is not a
+ *                                  guarantee, so confirm with `page.glRenderer()`.
+ * @param {string[]} [opts.gpuFlags] raw GL flags, overriding `gl`
  */
-export async function launchChrome({ offline = false, gpuFlags, windowSize = '1280,860' } = {}) {
+export async function launchChrome({ offline = false, gl = 'auto', gpuFlags, windowSize = '1280,860' } = {}) {
   const chrome = findChrome();
   if (!chrome) throw new Error(`no Chrome found. Looked in:\n  ${CHROME_CANDIDATES.join('\n  ')}`);
+  if (!gpuFlags && !GL_FLAGS[gl]) throw new Error(`unknown gl: ${gl}. Expected ${Object.keys(GL_FLAGS).join(' | ')}`);
 
   const profile = join(tmpdir(), `nonogram-cdp-${process.pid}-${Math.floor(process.hrtime()[1] / 1000)}`);
   mkdirSync(profile, { recursive: true });
@@ -94,7 +124,7 @@ export async function launchChrome({ offline = false, gpuFlags, windowSize = '12
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-gpu-sandbox',
-    ...(gpuFlags ?? ['--use-gl=angle', '--enable-unsafe-swiftshader']),
+    ...(gpuFlags ?? GL_FLAGS[gl]),
     ...(offline ? ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] : []),
     'about:blank',
   ];
@@ -197,6 +227,25 @@ function makePage(conn, sessionId) {
       return Buffer.from(data, 'base64');
     },
 
+    /**
+     * The GL backend this page actually got, e.g.
+     *   "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)"
+     *   "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...), SwiftShader driver)"
+     *
+     * Any run that quotes a timing number should record this next to it. Launch flags
+     * are a request; this is the answer, and DOO-20 happened because the two were
+     * assumed to be the same thing. Uses a throwaway canvas so it is safe to call on
+     * a page that is mid-measurement.
+     */
+    async glRenderer() {
+      return page.evaluate(`(() => {
+        const gl = document.createElement('canvas').getContext('webgl2')
+          ?? document.createElement('canvas').getContext('webgl');
+        const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        return info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : 'unknown';
+      })()`);
+    },
+
     /** Emulate a device: viewport, pixel ratio, touch, and a CPU slowdown factor. */
     async emulate({ width, height, deviceScaleFactor = 1, mobile = false, cpuThrottle = 1 }) {
       await ready;
@@ -231,19 +280,34 @@ function makePage(conn, sessionId) {
   return page;
 }
 
-/** A tiny pass/fail recorder shared by both gates. */
+/**
+ * A tiny pass/fail recorder shared by both gates.
+ *
+ * `advisory` exists for checks whose *input* can be invalid — a frame time read off a
+ * machine that is running six other jobs says nothing about the code. Such a check
+ * still prints and still lands in the JSON, but it does not set the exit code, so the
+ * gate keeps red-lighting only things a commit can cause. A gate that red-lights half
+ * its runs gets ignored, which costs more than the check was worth.
+ */
 export function checklist() {
   const checks = [];
   return {
     checks,
-    check(name, pass, detail = '') {
-      checks.push({ name, pass: !!pass, detail });
-      console.log(`${pass ? '  ok  ' : ' FAIL '} ${name}${detail ? `  — ${detail}` : ''}`);
+    check(name, pass, detail = '', { advisory = false } = {}) {
+      checks.push({ name, pass: !!pass, advisory, detail });
+      console.log(
+        `${pass ? '  ok  ' : advisory ? ' warn ' : ' FAIL '} ${name}${detail ? `  — ${detail}` : ''}`,
+      );
       return !!pass;
     },
     report() {
-      const failed = checks.filter((c) => !c.pass);
-      console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
+      const failed = checks.filter((c) => !c.pass && !c.advisory);
+      const warned = checks.filter((c) => !c.pass && c.advisory);
+      const passed = checks.filter((c) => c.pass).length;
+      console.log(
+        `\n${passed}/${checks.length} checks passed` +
+          (warned.length ? `, ${warned.length} advisory (not gating)` : ''),
+      );
       return failed;
     },
   };

@@ -18,8 +18,38 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CELL_SIZE, GAP } from './voxels.js';
 
 const BACKGROUND = 0xecdfc0;
+
+// How much slack to leave around what has to stay in frame; 1 inscribes it exactly.
+// Calibrated, not chosen: a landscape phone has ~363 CSS px of board to work with and
+// the gate's cell-aperture floor needs ~341 of them, so there is no room to spend here.
+// A cube's silhouette is 90% of its own bounding sphere, so even at 1 the board stops
+// short of the canvas edge at every angle but the extreme ones.
+const FIT_MARGIN = 1;
+
+// The opening view direction. Unchanged — what changed is that it no longer also
+// encodes the distance, which is why the old framing could not react to canvas shape.
+const VIEW_DIR = new THREE.Vector3(1, 0.85, 1).normalize();
+
+/**
+ * Radius of the sphere the camera has to keep in frame for a dims-sized puzzle.
+ *
+ * A sphere rather than the box's eight corners because OrbitControls lets the player
+ * look from anywhere: a fit computed for one orientation clips the board at others, a
+ * cube's projected width swinging 22% between corner-on and face-on. The sphere costs
+ * ~10% at the opening angle and is never wrong at any other.
+ */
+function fitRadiusFor(dims) {
+  const span = (n) => (n - 1) * GAP + CELL_SIZE;
+  const box = 0.5 * Math.hypot(span(dims.x), span(dims.y), span(dims.z));
+  // render/gizmo.js puts each axis label at 1.15x its line's length and the sprite is
+  // 0.5 units across, so on a small puzzle the labels reach past the box corners and
+  // they, not the box, set the frame.
+  const label = ((Math.max(dims.x, dims.y, dims.z) * GAP) / 2 + 0.6) * 1.15 + 0.25;
+  return Math.max(box, label);
+}
 
 // Retina policy.
 //
@@ -94,6 +124,39 @@ export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO } = {}) {
   let rafId = 0;
   let lastFrameAt = 0;
 
+  // What frameCamera was last asked to fit, and the distance that fit needed. Kept so
+  // resize() can re-fit for a new canvas shape without forgetting how far in the player
+  // had zoomed.
+  let fitRadius = 0;
+  let fitDistance = 0;
+
+  /** Distance at which `fitRadius` exactly fills the tighter of the two view half-angles. */
+  function distanceToFit() {
+    const halfHeight = Math.tan((camera.fov * Math.PI) / 360);
+    // A perspective camera's horizontal half-angle is the vertical one times the
+    // aspect, so a portrait canvas is limited by its *width*. The old framing read
+    // neither: it fit to height alone and ignored the canvas entirely, so a tall narrow
+    // canvas ran the board off the sides while a short wide one used 58% of the height
+    // it had. Both halves of DOO-13's unplayable board, one of them invisible until the
+    // layout fix made the canvas a sane shape.
+    return (fitRadius * FIT_MARGIN) / (halfHeight * Math.min(1, camera.aspect));
+  }
+
+  /** Re-apply the fit for the current aspect, keeping orbit direction and zoom. */
+  function refit() {
+    if (!fitRadius) return;
+    const want = distanceToFit();
+    // Zoom is preserved as a ratio, not a distance: someone who had zoomed to half the
+    // framing distance is still at half of it after rotating the phone, rather than
+    // being thrown back to the opening shot.
+    const zoom = fitDistance ? camera.position.distanceTo(controls.target) / fitDistance : 1;
+    const offset = camera.position.clone().sub(controls.target);
+    if (offset.lengthSq() === 0) offset.copy(VIEW_DIR);
+    camera.position.copy(controls.target).add(offset.setLength(want * zoom));
+    fitDistance = want;
+    controls.update();
+  }
+
   function resize() {
     const { clientWidth: w, clientHeight: h } = canvas;
     if (!w || !h) return;
@@ -104,12 +167,18 @@ export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO } = {}) {
     // a resize event.
     renderer.setPixelRatio(resolvePixelRatio(globalThis.devicePixelRatio, maxPixelRatio));
     renderer.setSize(w, h, false);
+    // The canvas' shape is half of the framing, so every resize is a re-fit. This is
+    // also the call that does the *first* fit: main.js frames a puzzle while the game
+    // screen is still hidden, where the canvas has no size to read yet.
+    refit();
   }
 
   function frameCamera(dims) {
-    const radius = Math.max(dims.x, dims.y, dims.z) * 1.8 + 1;
-    camera.position.set(radius, radius * 0.85, radius);
+    fitRadius = fitRadiusFor(dims);
+    fitDistance = 0; // a new puzzle opens un-zoomed
     controls.target.set(0, 0, 0);
+    camera.position.copy(VIEW_DIR).multiplyScalar(distanceToFit());
+    fitDistance = camera.position.length();
     controls.update();
   }
 
