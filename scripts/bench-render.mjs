@@ -25,6 +25,9 @@ const BASE = process.argv[2] ?? 'http://127.0.0.1:4173';
 const OUT = process.argv[3] ?? 'verify-out/bench.json';
 const SUITE = process.env.BENCH_SUITE ?? '3x3x3,4x4x4,5x5x5,6x6x6';
 const SECONDS = process.env.BENCH_SECONDS ?? '4';
+// Unset ships the cap from render/scene.js. BENCH_MAX_DPR overrides it, which is how
+// the cap was swept to pick a value — see DOO-19.
+const MAX_DPR = process.env.BENCH_MAX_DPR;
 
 // One InstancedMesh for filled cells + one for marked + one merged line mesh for the
 // cell outlines, plus the gizmo's 3 lines and 3 label sprites. The point of the
@@ -44,6 +47,13 @@ const DRAW_CALL_CEILING = 12;
 const P95_CEILING_MS = 20;
 const DROPPED_FRAME_ALLOWANCE = 0.02;
 
+// The retina floor (DOO-19). The drawing buffer must be the CSS box times the
+// device ratio, clamped to this. Stated here as an independent contract rather than
+// read back from the page, so the gate still fails if `setPixelRatio` is dropped or
+// the cap in render/scene.js is quietly lowered. Raising or lowering it is a
+// deliberate edit backed by the measurement recorded in render/scene.js.
+const MIN_PIXEL_RATIO_CAP = 2;
+
 const PROFILES = [
   { name: 'desktop', width: 1280, height: 860, deviceScaleFactor: 1, mobile: false, cpuThrottle: 1 },
   { name: 'mobile-4x', width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true, cpuThrottle: 4 },
@@ -59,7 +69,7 @@ for (const profile of PROFILES) {
   const page = await browser.newPage();
   await page.emulate(profile);
 
-  const url = `${BASE}/bench/?suite=${SUITE}&sec=${SECONDS}`;
+  const url = `${BASE}/bench/?suite=${SUITE}&sec=${SECONDS}${MAX_DPR ? `&maxdpr=${MAX_DPR}` : ''}`;
   console.log(`--- ${profile.name}  ${profile.width}x${profile.height}@${profile.deviceScaleFactor} cpu/${profile.cpuThrottle}`);
   await page.goto(url);
   // Every dims runs for SECONDS plus warm-up; give the slow profile real head room.
@@ -71,14 +81,24 @@ for (const profile of PROFILES) {
   const firstFrameMs = await page.evaluate('window.__bench.perf().firstFrameMs');
   runs[profile.name] = { profile, firstFrameMs, rows };
 
+  const ratio = rows[0]?.pixelRatio;
   console.log(
-    'dims     cells  draw   tri    fps    gap    p95    cpu     cpu-worst  dropped  build   repaint  pick',
+    `dpr: device ${profile.deviceScaleFactor} cap ${MAX_DPR ?? 'default'} → buffer ${ratio}x ` +
+      `(${rows[0]?.bufferPx.toLocaleString()} px)`,
+  );
+  // `sync` is the fill-axis instrument this profile otherwise lacks (DOO-19): a
+  // readPixels after the draw, which cannot be served until the raster finishes. The
+  // other timing columns are vsync-capped or bracket only our own code, so they read
+  // identically whether the buffer is 1x or 9x. This one moves with buffer area.
+  console.log(
+    'dims     cells  draw   tri    fps    gap    p95    cpu     sync   sync-p95  dropped  build   repaint  pick',
   );
   for (const r of rows) {
     console.log(
       `${r.dims.padEnd(8)} ${String(r.cells).padStart(4)}  ${String(r.drawCalls).padStart(4)} ` +
         `${String(r.triangles).padStart(6)} ${r.fps.toFixed(1).padStart(6)} ${r.frameMs.toFixed(2).padStart(6)} ` +
-        `${r.p95Ms.toFixed(2).padStart(6)} ${r.cpuMs.toFixed(3).padStart(7)} ${r.cpuWorstMs.toFixed(3).padStart(10)} ` +
+        `${r.p95Ms.toFixed(2).padStart(6)} ${r.cpuMs.toFixed(3).padStart(7)} ${r.syncMs.toFixed(2).padStart(6)} ` +
+        `${r.syncP95Ms.toFixed(2).padStart(9)} ` +
         `${String(r.droppedFrames).padStart(8)} ${r.buildMs.toFixed(2).padStart(7)} ${r.repaintMs.toFixed(3).padStart(8)} ` +
         `${r.picked === null ? ' MISS' : String(r.picked).padStart(5)}` +
         (r.over.length ? `   OVER ${r.over.join(',')}` : ''),
@@ -123,6 +143,18 @@ for (const [name, run] of Object.entries(runs)) {
     `${name}: first screen inside the 2s budget`,
     run.firstFrameMs !== null && run.firstFrameMs < 2000,
     `${run.firstFrameMs?.toFixed(0)}ms`,
+  );
+
+  // DOO-19. Blurriness shows up in no other number in this table — the board can be
+  // drawn at 1/9 the screen's pixels and still post a perfect fps. Skipped when the
+  // run is a deliberate cap sweep.
+  const wantRatio = Math.min(run.profile.deviceScaleFactor, MIN_PIXEL_RATIO_CAP);
+  check(
+    `${name}: drawing buffer is ${wantRatio}x the CSS box (device ${run.profile.deviceScaleFactor}, cap ≥ ${MIN_PIXEL_RATIO_CAP})`,
+    MAX_DPR ? true : run.rows.every((r) => r.pixelRatio >= wantRatio - 1e-6),
+    MAX_DPR
+      ? `skipped — BENCH_MAX_DPR=${MAX_DPR} sweep, measured ${run.rows[0]?.pixelRatio}x`
+      : run.rows.map((r) => `${r.dims}=${r.pixelRatio}x`).join(' '),
   );
 }
 

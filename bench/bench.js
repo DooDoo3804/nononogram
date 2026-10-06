@@ -12,12 +12,16 @@
 //   ?sec=4               measurement window per dims  (default 4)
 //   ?fill=0.45           fraction of cells FILLED     (default 0.45)
 //   ?spin=1              orbit the camera while measuring (default on)
+//   ?maxdpr=2            retina cap (default render/scene.js MAX_PIXEL_RATIO).
+//                        This is the knob that picked the shipped cap: fill cost
+//                        scales with buffer area, so sweeping it on the mobile
+//                        profile is how the DOO-19 ceiling was measured.
 //
 // `window.__bench.done` flips true when every run is finished and
 // `window.__bench.results` holds the rows — that is the contract
 // `scripts/bench-render.mjs` drives.
 
-import { createView } from '../render/scene.js';
+import { createView, MAX_PIXEL_RATIO } from '../render/scene.js';
 import { createVoxelGrid } from '../render/voxels.js';
 import { createAxisGizmo } from '../render/gizmo.js';
 import { createPerfMonitor, FRAME_BUDGET_MS, FIRST_SCREEN_BUDGET_MS } from '../render/perf.js';
@@ -34,6 +38,11 @@ const SUITE = (params.get('suite') ?? '3x3x3,4x4x4,5x5x5,6x6x6')
 const SECONDS = Number(params.get('sec') ?? 4);
 const FILL = Number(params.get('fill') ?? 0.45);
 const SPIN = params.get('spin') !== '0';
+const MAX_DPR = Number(params.get('maxdpr') ?? MAX_PIXEL_RATIO);
+// Each sync sample stalls the pipeline for one whole frame's raster, so on software
+// raster at 2.6Mpx this probe costs ~100ms a sample. 24 is enough for a median and a
+// p95; `?sync=0` turns it off when only the frame-pacing columns are wanted.
+const SYNC_SAMPLES = Number(params.get('sync') ?? 24);
 
 function parseDims(text) {
   const parts = text.toLowerCase().split('x').map(Number);
@@ -43,7 +52,7 @@ function parseDims(text) {
 
 const canvas = document.getElementById('scene');
 const report = document.getElementById('report');
-const view = createView(canvas);
+const view = createView(canvas, { maxPixelRatio: MAX_DPR });
 const perf = createPerfMonitor(view.renderer, { overlay: params.has('perf') });
 
 view.onFrame(() => perf.beginFrame());
@@ -67,6 +76,37 @@ function makeBoard(dims, fill) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+// Fill-rate probe — the number a DPR cap decision needs, and the one neither
+// existing frame metric can supply. `frameMs` is vsync-capped and `cpuMs` brackets
+// only our own code; the GPU rasterizes asynchronously, so a board drawn into a 9x
+// buffer posts the same flat 60.0fps as a 1x one right up until it misses vsync
+// outright. Forcing a pipeline sync after the draw puts the raster cost on the clock.
+//
+// readPixels rather than gl.finish(): finish() is advisory and several drivers return
+// immediately, but a pixel read cannot be served before the frame it reads is done.
+//
+// The result includes draw-call submission, so the fill cost of a cap is the
+// *difference* against the same board at cap 1, not the absolute number.
+async function probeFill(samples = SYNC_SAMPLES) {
+  if (samples <= 0) return { syncMs: 0, syncP95Ms: 0, syncMinMs: 0 };
+  const gl = view.renderer.getContext();
+  const px = new Uint8Array(4);
+  const times = [];
+  for (let i = 0; i < samples; i++) {
+    await nextFrame();
+    const at = performance.now();
+    view.renderer.render(view.scene, view.camera);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    times.push(performance.now() - at);
+  }
+  times.sort((a, b) => a - b);
+  return {
+    syncMs: times[Math.floor(times.length * 0.5)],
+    syncP95Ms: times[Math.floor(times.length * 0.95)],
+    syncMinMs: times[0],
+  };
+}
 
 const results = [];
 window.__bench = { results, done: false, perf: () => perf.stats() };
@@ -109,9 +149,16 @@ async function run(dims) {
   // camera axis at the board centre and see whether a cell answers.
   const picked = grid.pick(view.rayFrom(centerEvent(canvas)));
 
+  // After the window, never inside it: the sync stalls the pipeline on purpose and
+  // would show up as dropped frames in the numbers above.
+  const fill = await probeFill();
+
   const row = {
     dims: label,
     cells: cells.length,
+    // The fill-rate denominator: what the DPR cap actually bought in buffer pixels.
+    pixelRatio: round(view.pixelRatio(), 3),
+    bufferPx: canvas.width * canvas.height,
     ...grid.stats(),
     drawCalls: s.drawCalls,
     triangles: s.triangles,
@@ -125,6 +172,9 @@ async function run(dims) {
     frames: s.frames,
     buildMs: round(buildMs, 2),
     repaintMs: round(repaintMs, 3),
+    syncMs: round(fill.syncMs, 3),
+    syncP95Ms: round(fill.syncP95Ms, 3),
+    syncMinMs: round(fill.syncMinMs, 3),
     picked,
     over: s.over,
   };
@@ -149,13 +199,15 @@ function render() {
   const head =
     `budget: cpu ≤ ${FRAME_BUDGET_MS.toFixed(1)}ms/frame, 0 dropped, ` +
     `first screen ≤ ${FIRST_SCREEN_BUDGET_MS}ms   (window ${SECONDS}s, fill ${FILL}, spin ${SPIN ? 'on' : 'off'})\n` +
+    `dpr: device ${devicePixelRatio} cap ${MAX_DPR} → buffer ${view.pixelRatio()}x ` +
+    `(${canvas.width}x${canvas.height} for ${canvas.clientWidth}x${canvas.clientHeight} css)\n` +
     `first frame: ${perf.stats().firstFrameMs?.toFixed(0) ?? '—'}ms\n\n` +
-    'dims     cells  draw  tri     fps   gap    p95    cpu     cpu-worst  dropped  build   repaint  pick\n';
+    'dims     cells  draw  tri     fps   gap    p95    cpu     sync    dropped  build   repaint  pick\n';
   const rows = results.map(
     (r) =>
       `${r.dims.padEnd(8)} ${String(r.cells).padStart(4)}  ${String(r.drawCalls).padStart(4)}  ` +
       `${String(r.triangles).padStart(6)}  ${r.fps.toFixed(1).padStart(5)} ${r.frameMs.toFixed(2).padStart(6)} ` +
-      `${r.p95Ms.toFixed(2).padStart(6)} ${r.cpuMs.toFixed(3).padStart(7)} ${r.cpuWorstMs.toFixed(3).padStart(10)} ` +
+      `${r.p95Ms.toFixed(2).padStart(6)} ${r.cpuMs.toFixed(3).padStart(7)} ${r.syncMs.toFixed(2).padStart(7)} ` +
       `${String(r.droppedFrames).padStart(8)} ${r.buildMs.toFixed(2).padStart(7)} ${r.repaintMs.toFixed(3).padStart(8)} ` +
       `${r.picked === null ? ' MISS' : String(r.picked).padStart(5)}` +
       (r.over.length ? `   ⚠ ${r.over.join(',')}` : ''),
