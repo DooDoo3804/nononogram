@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { pipeConnection, assertNodeSupport, MIN_NODE } from '../scripts/cdp.mjs';
+import { pipeConnection, assertNodeSupport, MIN_NODE, shouldWatchParent } from '../scripts/cdp.mjs';
 
 /** A stand-in for the Chrome child process: fd 3 we write, fd 4 it writes. */
 function fakeChrome() {
@@ -144,5 +144,26 @@ describe('node version floor', () => {
       expect(() => assertNodeSupport(v)).toThrow(new RegExp(`node ${v} is too old`));
     }
     expect(() => assertNodeSupport('16.20.2')).toThrow(new RegExp(process.execPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+});
+
+describe('parent-death watchdog arming', () => {
+  // The watchdog exits a live process, so when it arms matters as much as that it works.
+  // The firing path needs real reparenting and is proven by the signal matrix in DOO-37,
+  // not here; this covers the guard that decides whether to arm at all.
+  it('arms under an ordinary launcher', () => {
+    expect(shouldWatchParent(4321, {})).toBe(true);
+  });
+
+  it('stays disarmed when ppid is already 1 — init-parented is not distinguishable from orphaned', () => {
+    expect(shouldWatchParent(1, {})).toBe(false);
+    expect(shouldWatchParent(0, {})).toBe(false);
+  });
+
+  it('honours the opt-out, for a run meant to outlive its shell', () => {
+    expect(shouldWatchParent(4321, { NONOGRAM_CDP_NO_PARENT_WATCH: '1' })).toBe(false);
+    // Only the exact opt-in value counts — a stray empty or "0" must not disarm it.
+    expect(shouldWatchParent(4321, { NONOGRAM_CDP_NO_PARENT_WATCH: '0' })).toBe(true);
+    expect(shouldWatchParent(4321, { NONOGRAM_CDP_NO_PARENT_WATCH: '' })).toBe(true);
   });
 });

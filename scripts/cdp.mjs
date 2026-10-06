@@ -70,8 +70,11 @@ const liveBrowsers = new Set();
 const DEATH_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 let teardownInstalled = false;
 
+/** How often the parent-death watchdog reads `process.ppid`. */
+export const PARENT_WATCH_MS = 1000;
+
 /**
- * Three layers, because no one of them covers every way a run can end (DOO-37).
+ * Four layers, because no one of them covers every way a run can end (DOO-37).
  *
  * 1. `--remote-debugging-pipe` (in `launchChrome`). Chrome quits when the CDP pipe
  *    reaches EOF, and the kernel closes that pipe however this process dies — including
@@ -84,6 +87,12 @@ let teardownInstalled = false;
  *    the profile, and re-raise so the process still dies *of* the signal it was sent.
  * 3. The `exit` listener. Covers the ordinary paths: a throw out of a gate script, and
  *    `process.exit(1)` after a failed check.
+ * 4. The parent-death watchdog. Layers 1-3 all assume the signal arrives *here*. The run
+ *    that stranded DOO-8 never sent one: Paperclip killed the run, the driver shell
+ *    outlived it (`errorCode=orphaned_running_run`), and the harness node under it kept
+ *    sweeping — so the pipe stayed open and the browser was correctly kept alive, for a
+ *    measurement nobody was reading. Confirmed live on this machine while fixing it:
+ *    `91308 ppid=1 zsh qa-out/doo8/rerun-v.sh` driving a 24-minute `playtest.mjs`.
  */
 function installTeardown() {
   if (teardownInstalled) return;
@@ -104,6 +113,48 @@ function installTeardown() {
     };
     process.on(signal, onSignal);
   }
+
+  installParentWatch();
+}
+
+/**
+ * Exit when whoever started this harness is gone.
+ *
+ * `process.ppid` is read live, not cached at startup, so reparenting is visible here:
+ * when the parent dies the kernel hands the orphan to init and the value becomes 1
+ * (verified by measurement, not by the docs). A change is therefore the one signal
+ * available for "my launcher died without telling me", and an orphaned measurement has
+ * no consumer by definition — nothing downstream is left to read what it produces.
+ *
+ * Deliberately narrow, because this exits a live process:
+ *   - only a *change* counts. A harness whose ppid is already 1 (launchd, a detached
+ *     supervisor) is indistinguishable from an orphan, so it is never armed.
+ *   - the timer is `unref`'d, so it cannot by itself keep a finished gate alive.
+ *   - `NONOGRAM_CDP_NO_PARENT_WATCH=1` opts out, for a run meant to outlive its shell.
+ *
+ * The exit is `process.exit`, which runs the layer-3 listener above, which closes the
+ * browsers and removes the profiles. 143 = 128+SIGTERM: not killed by a signal, but the
+ * same meaning, and distinguishable from a gate's own failure codes.
+ */
+export function shouldWatchParent(launcher, env = process.env) {
+  if (env.NONOGRAM_CDP_NO_PARENT_WATCH === '1') return false;
+  return Number.isInteger(launcher) && launcher > 1;
+}
+
+function installParentWatch() {
+  const launcher = process.ppid;
+  if (!shouldWatchParent(launcher)) return;
+
+  const timer = setInterval(() => {
+    if (process.ppid === launcher) return;
+    clearInterval(timer);
+    process.stderr.write(
+      `cdp: launcher pid ${launcher} is gone (ppid is now ${process.ppid}) — ` +
+        `closing ${liveBrowsers.size} browser(s) and exiting. Nothing is reading this run.\n`,
+    );
+    process.exit(143);
+  }, PARENT_WATCH_MS);
+  timer.unref();
 }
 
 /**
@@ -404,7 +455,14 @@ function makePage(conn, sessionId) {
 
     async goto(url, { settleMs = 600 } = {}) {
       await ready;
-      await call('Page.navigate', { url });
+      const { errorText } = await call('Page.navigate', { url });
+      // A navigation that never landed must say so here. Chrome serves its own error
+      // document instead, and that document answers `document.readyState === 'complete'`
+      // like any other, so the poll below is satisfied and the failure surfaces several
+      // calls later as whatever the caller touches first — for a dead server, three runs
+      // of `SecurityError: Failed to read the 'localStorage' property`, because an error
+      // page is an opaque origin. No call site navigates somewhere it expects to fail.
+      if (errorText) throw new Error(`navigation to ${url} failed: ${errorText}`);
       for (let i = 0; i < 100; i++) {
         const state = await page.evaluate('document.readyState').catch(() => null);
         if (state === 'complete') break;
