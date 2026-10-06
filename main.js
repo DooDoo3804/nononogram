@@ -12,6 +12,7 @@ import { createView } from './render/scene.js';
 import { createVoxelGrid } from './render/voxels.js';
 import { createAxisGizmo } from './render/gizmo.js';
 import { createPerfMonitor } from './render/perf.js';
+import { mountPeel } from './render/peel.js';
 import { mountScreens } from './ui/screens.js';
 import { mountMenu } from './ui/menu.js';
 import { mountClues } from './ui/clues.js';
@@ -145,6 +146,17 @@ document.getElementById('btn-game-back').addEventListener('click', () => menu.re
 
 window.addEventListener('resize', () => view.resize());
 
+// --- depth cursor --------------------------------------------------------------
+// `[` and `]` peel layers off whichever face of the box the camera is looking at, so
+// an interior cell can be a full cell-sized click target instead of a sliver between
+// the cells in front of it (DOO-17). Mounted here and nowhere else: the cursor is a
+// view onto the board, so nothing in `state/` knows it exists.
+//
+// The keyboard binding is a desktop stopgap. The on-screen control, and teaching the
+// player it is there, is DOO-28 on the UI/UX track — it should drive this object
+// rather than reach into the grid.
+const peel = mountPeel({ view, getGrid: () => grid });
+
 // perf brackets the whole frame — callbacks, controls and the draw call — so
 // `cpuMs` is the number with head room in it, not the vsync-capped frame gap.
 view.onFrame(() => {
@@ -177,4 +189,8 @@ window.__nonogram = {
       puzzles: level.puzzles.map((spec) => ({ id: spec.id, dims: spec.dims })),
     })),
   rewards: rewards.debug,
+  // Read-only, like `mode()` above: the aim probe drives the cursor with real key
+  // events and reads this to assert where it landed. A setter here would let a
+  // measurement pass while the binding a player uses stayed broken.
+  peel: () => peel.state(),
 };
