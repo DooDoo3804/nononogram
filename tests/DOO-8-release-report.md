@@ -2059,3 +2059,44 @@ new: (v === 1 ? 1 : 0) !== want              (커밋 a56b114)
 `stranded`=0(결함 D), `(2,1)`류 소멸(결함 E), 그리고 **`unfixed`의 절대값**이다.
 `unfixed`가 남으면 제품 이슈로 올리고, 0이면 §17.11의 오조준 신호는 **근거가 없어진다** —
 세 후보 중 어느 것도 제품을 재지 못했기 때문이다.
+
+### 18.8 결함 H — 집계가 **존재하지 않는 필드**를 grep했다 (침묵 = 성공으로 읽히는 종류)
+
+§18.7이 `unfixed`를 **유일하게 살아남은 제품 신호**로 남겼다. 그래서 `finish2.sh`의 집계
+꼬리와 감시자가 그걸 읽는 방식을 돌리기 전에 확인했다. 둘 다 이렇게 적혀 있었다.
+
+```
+grep -cE 'unfixed=[1-9]'
+```
+
+**하네스는 `unfixed=`를 출력하지 않는다.** 실제 모양은 두 가지다.
+
+```
+ FAIL  desktop l3-bird: the correction pass left no reachable cell wrong  — 4 unfixed after 6 corrective clicks: [{"cell":62,"state":2,"want":1}]
+  l4-dog       6x6x4  need= 52  51 clicks + 4 fix  solved=true  stranded=0 missed=0 wrong=0  117s
+```
+
+요약 줄에는 `unfixed` 칸이 **아예 없고**, 체크 줄은 `N unfixed after …` 꼴이다. 즉
+`unfixed`가 0이 아니어도 집계는 **0을 적고 조용히 지나간다** — 그리고 그건 성공과
+글자 그대로 구별되지 않는다. 결함 F와 같은 과(科)다: 내 계측이 거짓으로 조용하다.
+
+패턴을 가정하지 않고 **하네스가 실제로 뱉는 모양에 대고 검증**했다.
+
+| 패턴 | 매치 |
+|---|---|
+| `unfixed=[1-9]` (쓰고 있던 것) | **0** |
+| `[1-9][0-9]* unfixed` | 1 — `4 unfixed` |
+| `[0-9]+ unfixed` → 합산 | 4 |
+| `"state":2,"want":1` (결함 E 생존 서명) | 1 |
+| `^ FAIL .*correction pass left no reachable cell wrong` | 1 |
+
+`finish3.sh`로 교체했다. 네 질문을 로그가 스스로 답하게 하고, `play-mobile`에도 같은
+집계를 돌린다. `(2,1)` 클래스를 `"state":2,"want":1`로 직접 세므로 결함 E 확인이
+파생값이 아니라 **직접 관측**이 된다. 게이트 재확인에 `tests/mistake-count.mjs`도 넣었다.
+
+#### 부수 사고 — `pkill -f`로 **내 감시자를 죽였다**
+
+`finish2.sh`를 교체하려고 `pkill -f 'finish2.sh'`를 썼는데, 감시자 스크립트의 명령줄이
+그 문자열을 **패턴으로 품고 있어서** 같이 죽었다 (exit 144). 측정에는 영향이 없다 —
+감시자는 읽기 전용이고 드라이버는 그대로 돌았다. 재가동했고, **이후 교체는 pid로 한다.**
+§17.1~17.4가 프로세스 관리로 세 런을 잃었으므로 같은 과의 실수를 기록해 둔다.
