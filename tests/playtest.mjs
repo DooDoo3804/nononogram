@@ -697,9 +697,23 @@ const PROBE = `(() => {
       let latchedAt = null;
       listen();
       const hits = [];
+      // Only pixels the *browser* would route to the canvas are candidates. A synthetic
+      // tap is dispatched on the canvas node, so it skips hit-testing and happily
+      // "reaches" a cell from a pixel outside the canvas rect — but \`realTap\` is a real
+      // event and lands on whatever covers that pixel, so such a pixel is unclickable
+      // and recording it produces a miss that reads exactly like an unaimable cell.
+      // Measured: on 1280x860 the canvas is [132, 225, 1017, 547], so it ends at y=772;
+      // the raster recorded y=770 for four cells of the 3x3x3 box and this search, with
+      // no clamp, moved the centroid to y=773-774. Every 3x3x3 puzzle then failed
+      // identically (l1-chair 4 cells, l1-stairs 2, l1-arch 4) on cells whose aperture
+      // was 15,700-16,300px² — a 125px target "missed" because the pixel was 2px off the
+      // bottom edge. \`rasterAt\` has always clamped this way; this did not.
+      const r = canvas.getBoundingClientRect();
+      const inCanvas = (px, py) => px >= r.left && py >= r.top && px <= r.right && py <= r.bottom;
       for (let dy = -radius; dy <= radius; dy += step) {
         for (let dx = -radius; dx <= radius; dx += step) {
           const px = hint[0] + dx, py = hint[1] + dy;
+          if (!inCanvas(px, py)) continue;
           const i = tap(px, py);
           if (i === null) continue;
           if (!latchedAt && s.solved) {
@@ -730,7 +744,11 @@ const PROBE = `(() => {
       }
       // leave the board exactly as we found it — park released last, see \`unwind\`.
       unwind(before, guard.park);
-      return { px, samples: hits.length, radius, guarded: guard.guarded, solved: s.solved, solvedAtEntry, park: guard.park, latchedAt };
+      // The centroid of in-rect points is in-rect, and the fallback picks one of the
+      // hits, so this cannot currently fail — it is here so that it starts failing if
+      // the search above ever stops clamping again.
+      return { px, samples: hits.length, radius, guarded: guard.guarded, solved: s.solved,
+        solvedAtEntry, park: guard.park, latchedAt, inCanvas: inCanvas(px[0], px[1]) };
     },
 
     /** Whatever element the browser would route a tap at (px, py) to. */
@@ -1329,6 +1347,31 @@ async function runReach(page, platform, { dimsList, step, out, check, peel = tru
 // --- mode: play --------------------------------------------------------------
 
 /**
+ * Wait for dispatched real taps to have landed, counted in frames.
+ *
+ * This replaced `sleep(150)` / `sleep(120)` / `sleep(90)`, and for the same reason
+ * DOO-31 took the wall-clock waits out of `reach`: a sleep measures the clock, not the
+ * thing being waited for. A CDP input event has to cross to the renderer, run the
+ * listener, and have the session's `cell` event applied before `__qa.board()` can see
+ * it. On a quiet machine 150ms is many frames of slack; at the load this box actually
+ * runs at (measured: 1-minute average **470 on 8 cores**) it is not reliably even one,
+ * so the board got read before the taps landed and the cells came back as `missed` —
+ * a *harness* miss indistinguishable in the output from a cell the player cannot hit.
+ *
+ * Frames are the right unit because they are the unit the thing being waited on runs
+ * in: `render/scene.js` drives everything from rAF, so N frames means N real chances
+ * for the tap to have been applied however slowly the clock is running. Under load the
+ * wait takes longer in seconds and exactly as long in frames, which is what makes the
+ * result reproducible instead of load-dependent.
+ *
+ * 10 frames, not 2: the margin is cheap (a `play` run is thousands of taps, not
+ * millions) and the failure it prevents is one that reads as a product defect.
+ */
+function settleTaps(page, frames = 10) {
+  return page.evaluate(`window.__qa.frames(${frames})`);
+}
+
+/**
  * Finish one puzzle with real input only.
  *
  * Cells are clicked in groups by the sweep step that reaches them, so the camera is
@@ -1362,6 +1405,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
   let clicks = 0;
   const misses = [];
   const probeLatches = [];
+  const offCanvas = [];
 
   for (const [stepName, group] of groups) {
     // `fresh: false` is load-bearing: a fresh open drops the puzzle's saved board, which
@@ -1384,7 +1428,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     const located = await page
       .evaluate(`JSON.stringify(${JSON.stringify(wanted)}.map((w) => {
         const f = window.__qa.findPixel(w.cell, w.px, 14, 2);
-        return { cell: w.cell, px: f.px, samples: f.samples, guarded: f.guarded, solved: f.solved, solvedAtEntry: f.solvedAtEntry, park: f.park, latchedAt: f.latchedAt };
+        return { cell: w.cell, px: f.px, samples: f.samples, guarded: f.guarded, solved: f.solved, solvedAtEntry: f.solvedAtEntry, park: f.park, latchedAt: f.latchedAt, inCanvas: f.inCanvas };
       }))`)
       .then(JSON.parse);
 
@@ -1395,6 +1439,10 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     // permanently unfillable by any real tap.
     probeLatches.push(...located.filter((l) => l.solved || l.guarded === false)
       .map((l) => ({ cell: l.cell, stepName, guarded: l.guarded, solved: l.solved, solvedAtEntry: l.solvedAtEntry, park: l.park, latchedAt: l.latchedAt })));
+    // A pixel a real click cannot be routed to is not a usable target, and the symptom
+    // if it slips through is a miss that looks like an unaimable cell. See `findPixel`.
+    offCanvas.push(...located.filter((l) => l.px && l.inCanvas === false)
+      .map((l) => ({ cell: l.cell, stepName, px: l.px })));
 
     const todo = [];
     for (const l of located) {
@@ -1405,7 +1453,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
       await realTap(page, px[0], px[1], platform);
       clicks++;
     }
-    await sleep(150);
+    await settleTaps(page);
 
     const after = await page.evaluate('JSON.stringify(window.__qa.board())').then(JSON.parse);
     for (const { cell, px } of todo) {
@@ -1415,7 +1463,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
       await page.evaluate(`window.__nonogram.session().set(${cell}, 0)`);
       await realTap(page, px[0], px[1], platform);
       clicks++;
-      await sleep(120);
+      await settleTaps(page);
       const value = await page.evaluate(`window.__nonogram.session().state[${cell}]`);
       if (value !== 1) misses.push({ cell, px, stepName, value });
     }
@@ -1442,7 +1490,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
       for (let n = 0; n < (v === 1 ? 2 : 1); n++) {
         await realTap(page, rec.px[0], rec.px[1], platform);
         corrections++;
-        await sleep(90);
+        await settleTaps(page);
       }
     }
   }
@@ -1466,6 +1514,7 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     stranded,
     misses,
     probeLatches,
+    offCanvas,
     solved,
     wrongCells: wrong,
     celebrated,
@@ -1480,6 +1529,11 @@ async function playPuzzle(page, entry, reach, platform, { out, check }) {
     `${platform.label} ${entry.id}: no probe latched solved mid-playthrough`,
     probeLatches.length === 0,
     JSON.stringify(probeLatches.slice(0, 3)),
+  );
+  check(
+    `${platform.label} ${entry.id}: every pixel aimed at is one a real click can reach`,
+    offCanvas.length === 0,
+    JSON.stringify(offCanvas.slice(0, 3)),
   );
   check(
     `${platform.label} ${entry.id}: finished with real ${platform.touch ? 'taps' : 'clicks'} only`,
