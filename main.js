@@ -16,6 +16,7 @@ import { mountScreens } from './ui/screens.js';
 import { mountMenu } from './ui/menu.js';
 import { mountClues } from './ui/clues.js';
 import { mountHud } from './ui/hud.js';
+import { mountRewards } from './fx/index.js';
 
 const SOLVED_TEXT = 'Solved! 🎉';
 
@@ -40,11 +41,22 @@ const menu = mountMenu({
   show: screens.show,
 });
 
+// The reward layer (timer, records, hints, unlocks, sound, clear celebration). It
+// brings its own DOM and CSS and discovers the rest through `session`/`grid`/`view`,
+// so the wiring here is three lines: mount, open, close.
+const rewards = mountRewards({
+  levels: LEVELS,
+  view,
+  openPuzzle,
+  backToList: () => menu.reopenCurrentLevel(),
+});
+
 function repaintClues() {
   clues.render(session.dims, session.clues, session.currentRuns());
 }
 
 function teardownPuzzle() {
+  rewards.closePuzzle();
   if (grid) {
     view.scene.remove(grid.group);
     grid.dispose();
@@ -79,6 +91,8 @@ function openPuzzle(spec) {
     repaintClues();
   });
   session.on('solved', () => hud.setStatus(SOLVED_TEXT));
+
+  rewards.openPuzzle({ session, grid });
 
   screens.show('screen-game');
   view.resize();
@@ -152,4 +166,5 @@ window.__nonogram = {
       id: level.id,
       puzzles: level.puzzles.map((spec) => ({ id: spec.id, dims: spec.dims })),
     })),
+  rewards: rewards.debug,
 };

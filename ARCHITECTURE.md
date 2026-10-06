@@ -10,8 +10,15 @@ Angerl에게 묻는다.
 ui/      → DOM만 만진다.           THREE import 금지.
 render/  → WebGL/canvas만 만진다.  document 조회 금지(캔버스는 주입받는다).
 state/   → 게임 규칙만.            DOM·THREE import 금지 → node에서 그대로 테스트된다.
-main.js  → 위 셋을 아는 유일한 파일. 배선만. 로직 금지.
+audio/   → WebAudio만.             에셋 파일 없음(전부 합성).
+fx/      → 연출 전용.              DOM·THREE 둘 다 쓰는 유일한 레이어 — 아래 설명 참고.
+main.js  → 위를 아는 유일한 파일.  배선만. 로직 금지.
 ```
+
+`fx/`가 레이어 규칙의 예외인 이유: 클리어 연출은 카드(DOM)와 보셀 리빌·카메라(THREE)가
+한 타임라인에 묶여 있어서 둘을 쪼개면 타이밍이 두 파일로 흩어진다. 대신 **읽기 전용
+소비자**로 제한한다 — `grid.setState`, `view.controls`, `cellCenters` 같은 공개 API만 쓰고
+`render/`·`ui/` 파일을 고치지 않으며, 자기 DOM과 CSS를 직접 만들어 붙인다.
 
 클릭은 `ui`/`render` → `session`으로 들어가고, 세션이 이벤트를 내보내면 `render`/`ui`가
 반응한다. 레이어끼리 서로를 직접 호출하지 않는다 — 그래야 트랙별로 따로 고칠 수 있다.
@@ -23,7 +30,7 @@ main.js  → 위 셋을 아는 유일한 파일. 배선만. 로직 금지.
 | `puzzle.js` `solver.js` `shapes/` `levels.js` | 퍼즐 설계 (Solvera) |
 | `vite.config.js` `vitest.config.js` `eslint.config.js` `package.json` `render/` `state/` 골격 `scripts/` `bench/` | 플랫폼 (Vitra) |
 | `index.html` `style.css` `ui/` | UI/UX (Pixa) |
-| `state/progress.js` `audio/` 연출 | 게임 디자인 (Rewarde) |
+| `state/progress.js` `state/attempt.js` `state/hints.js` `state/unlock.js` `state/difficulty.js` `state/shape-name.js` `audio/` `fx/` `scripts/verify-rewards.mjs` | 게임 디자인 (Rewarde) |
 | `tests/` 리포트 | QA (Proba) |
 
 ## 공개 API
@@ -67,14 +74,76 @@ createSession(spec) -> {
 **게임 디자인 트랙**: 연출·오디오는 `session.on('cell'|'solved')` 구독으로 붙인다 —
 `render/`나 `ui/` 수정이 필요 없다.
 
-### `state/progress.js` — 진행 저장 (게임 디자인 트랙 소유)
+### `state/progress.js` — 진행·기록·설정 저장 (게임 디자인 트랙 소유)
 ```js
-loadProgress(puzzleId)              // -> { state: number[], solved } | null
-saveProgress(puzzleId, cells, solved)
+loadProgress(puzzleId)              // -> 저장된 원본 { state, solved, ... } | null
+saveProgress(puzzleId, cells, solved)   // 기록 필드를 보존하며 보드만 갱신
+loadRecord(puzzleId)                // -> 정규화된 기록 (null 아님)
+saveRecord(puzzleId, patch)         // 보드를 보존하며 기록만 갱신
+loadSettings() / saveSettings(patch)
 setStorage(storageLike)             // 테스트용 주입
 ```
 localStorage 키 `no-nonogram:<puzzleId>`와 페이로드 모양은 **이미 저장된 브라우저와의
-호환 계약**이다. 바꾸려면 편집이 아니라 마이그레이션이 필요하다.
+호환 계약**이다. DOO-6이 타이머·실수·힌트·최고기록을 얹었지만 **버전 필드는 없다**:
+
+- 기본값이 곧 "기록 없음"이라 옛 `{state, solved}`가 그대로 유효한 기록으로 읽힌다.
+- `saveProgress`는 기본값이 아닌 기록 필드만 쓴다 → 아직 클리어하지 않은 퍼즐의 저장
+  바이트는 DOO-6 이전과 **완전히 동일**하다 (`tests/progress.test.js`가 문자열로 고정).
+- 옛 리더는 `.state`/`.solved`만 보므로 새 필드는 무시된다.
+
+설정은 `no-nonogram:@settings`에 따로 둔다 — `@`는 퍼즐 id에 나올 수 없어 충돌이 없다.
+
+### 보상 레이어 — `fx/` + `state/` (게임 디자인 트랙 소유)
+
+`main.js`가 거는 배선은 세 줄(mount / open / close)이고, 나머지는 스스로 찾아 붙는다.
+
+```js
+mountRewards({ levels, view, openPuzzle, backToList }) -> {
+  openPuzzle({ session, grid }), closePuzzle(),
+  unlocks(), refreshLocks(), debug, dispose(),
+}
+```
+
+규칙 쪽은 전부 DOM 없이 node에서 테스트된다.
+
+```js
+// state/attempt.js — 한 판의 타이머·실수·힌트 소모
+createAttempt({ session, now?, persist? }) -> {
+  elapsedMs(), mistakes(), hints(), hintUses(), best(), result(),
+  resume(), pause(), running(), noteHint(cost), flush(), on(evt, fn), dispose(),
+}
+formatDuration(ms)
+
+// state/hints.js — 단계적 힌트. solver.js를 고치지 않고 공개 API만 호출한다
+createHints({ session, onSpend }) -> { next(), peek(), uses(), points(), reset() }
+HINT_COST   // { 1: 1, 2: 2 } — 1단계 라인 지목, 2단계 셀 확정
+
+// state/unlock.js — 레벨 해금. 점수원과 클리어 판정은 주입받는 순수 규칙
+UNLOCK_SHARE  // 0.5
+computeUnlocks(levels, { isSolved, scoreFor, share? })
+isPuzzleUnlocked(unlocks, puzzleId, levels)
+
+// state/difficulty.js — solver 난이도 점수, 메모화
+difficultyFor(spec) / resetDifficultyCache()
+
+// state/shape-name.js — 클리어 카드 제목
+resolveShapeName(spec, cells, { index, fallback })   // spec.name → 지문 조회 → fallback
+
+// audio/sfx.js — 전부 WebAudio 합성, 에셋 0개
+createSfx({ muted, onMutedChange, AudioCtx? }) -> { play(name), muted(), setMuted(b), toggleMuted(), dispose() }
+```
+
+**다른 트랙이 알아야 할 것**
+
+- `index.html`·`style.css`를 **고치지 않는다**. `fx/chrome.js`가 `.puzzle-info`와
+  `.band--bottom`에 *덧붙이고*, `fx/styles.js`가 `fx-` 네임스페이스 CSS를 주입한다.
+  색은 `:root` 변수에서 읽으므로 UI 트랙 팔레트 변경이 연출에 그대로 반영된다.
+- 레벨 잠금은 `#levels-grid`를 MutationObserver로 보며 덧칠한다. `ui/menu.js`가
+  다시 그릴 때마다 재적용되므로 UI 트랙은 평소대로 작업하면 된다.
+- 모션은 전부 `<html class="fx-motion">` 뒤에 있다. `prefers-reduced-motion`이나
+  저장된 설정이 끄면 리빌과 카드는 남고 회전·반짝임만 사라진다.
+- 해금이 걸려 있으니 **렌더/성능 측정이 상위 레벨 보드에 닿으려면 진행을 시드**해야
+  한다 — `window.__nonogram.levels()`가 그 용도다.
 
 ### `render/scene.js` — 단일 WebGL 뷰
 ```js
@@ -182,6 +251,21 @@ mountHud({ onUndo }) -> { setStatus(text), setDims(text) }
 카드 수·dims·퍼즐 id를 돌아가는 앱에서 읽는다. 레벨 2~4는 리워드 레이어가 점수로
 잠그므로, 게이트가 먼저 `localStorage`에 클리어 진행을 심어서 6³까지 들어간다
 (`window.__nonogram.levels()`가 그 용도).
+
+### 보상 레이어 게이트 — `scripts/verify-rewards.mjs`
+
+```sh
+npm run build && npx vite preview --port 4188 --host 127.0.0.1 &
+node scripts/verify-rewards.mjs http://127.0.0.1:4188 rewards-out
+```
+
+51개 검사: 클리어 연출(모양 조립·이름·기록 카드), 단계적 힌트, 타이머·실수·최고기록,
+해금 곡선, 음소거 유지, **옛 localStorage 페이로드 마이그레이션**, 모바일 390px,
+`prefers-reduced-motion`. 카탈로그를 하드코딩하지 않고 실행 중인 앱에서 읽어온다.
+
+> 플랫폼 게이트와 다른 CDP 포트(9444)를 쓴다. `launchChrome`은 이미 열려 있는 포트에
+> 그냥 붙기 때문에, 같은 포트를 쓰면 상대 런의 프로필과 시드된 진행까지 물려받아
+> 해금 검사가 전부 무의미해진다.
 
 ### 렌더 성능 게이트 — `scripts/bench-render.mjs` + `bench/`
 
