@@ -3,7 +3,7 @@
 //   npm run build && node tests/phone-bench.mjs
 //
 // Prints a short LAN URL. Open it on an Android phone on the same Wi-Fi, leave the
-// screen on for ~70 seconds, and the numbers land in `verify-out/` on this machine
+// screen on for ~90 seconds, and the numbers land in `verify-out/` on this machine
 // and on the phone's screen as a pass/fail card worth screenshotting.
 //
 // Why a wrapper instead of just telling someone to open `/bench/`:
@@ -19,6 +19,14 @@
 //   * rAF stops when the screen sleeps or the tab is backgrounded, which silently
 //     turns into "0 dropped frames, 60fps". The run is marked tainted if the page was
 //     ever hidden while measuring.
+//   * The frame columns are blind to the fill axis. `frameMs`/`p95Ms` are vsync-capped
+//     and `cpuMs` brackets only our own code, so the GPU rasterizing into a 2x buffer
+//     posts the same flat 60.0fps as a 1x one right up until it misses vsync outright
+//     — DOO-19 measured p95 flat at 17.8ms across caps 1 through 2.625. Reporting only
+//     those columns off a phone would be a false pass for the `MAX_PIXEL_RATIO` cap
+//     that `render/scene.js` now ships. So the sync (readPixels fence) column comes
+//     back too, and a third phase sweeps `?maxdpr=` on the worst size to measure this
+//     phone's fill rate in ms per megapixel.
 //
 // The bench page itself is unmodified: it is loaded in a same-origin iframe sized to
 // the full viewport, so it renders at the device's real resolution, and the wrapper
@@ -47,6 +55,21 @@ const P95_CEILING_MS = 20;
 const FIRST_FRAME_CEILING_MS = 2000;
 const THERMAL_REGRESSION = 1.25; // pass 2 p95 vs pass 1, per size
 const DRAW_CALL_CEILING = 12; // 2 instanced meshes + outlines + 3 gizmo lines + 3 labels
+const FRAME_BUDGET_MS = 1000 / 60; // the team pass line is "60fps", independent of panel Hz
+
+// The shipped cap in render/scene.js. Hard-coded rather than read off the page for the
+// same reason scripts/bench-render.mjs hard-codes it: if `setPixelRatio` goes missing
+// or the cap is quietly lowered, a gate that asks the page what it did cannot notice.
+const SHIPPED_DPR_CAP = 2;
+// Worst size only. The sweep exists to constrain the cap, and fill cost scales with
+// buffer area, not cell count — 6³ is where both are largest.
+const SWEEP_DIMS = process.env.BENCH_SWEEP_DIMS ?? '6x6x6';
+const SWEEP_CAPS = (process.env.BENCH_SWEEP_CAPS ?? '1,1.5,2')
+  .split(',')
+  .map(Number)
+  .filter((n) => n > 0);
+const SWEEP_SECONDS = Number(process.env.BENCH_SWEEP_SECONDS ?? 1);
+const SWEEP_SYNC_SAMPLES = Number(process.env.BENCH_SWEEP_SYNC ?? 32);
 
 if (!existsSync(join(DIST, 'bench', 'index.html'))) {
   console.error('dist/bench/index.html is missing — run `npm run build` first.');
@@ -102,6 +125,13 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // dist/ has no favicon, and the resulting 404 lands in the phone's console as an
+  // error — noise in the one place a tester is told to look for real failures.
+  if (url.pathname === '/favicon.ico') {
+    res.writeHead(204).end();
+    return;
+  }
+
   if (url.pathname === '/' || url.pathname === '/index.htm') {
     res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-store' });
     res.end(wrapperHtml());
@@ -136,14 +166,23 @@ async function save(payload, req) {
   const file = join(OUT_DIR, `phone-bench-${slug(name)}-${stamp}.json`);
   await mkdir(OUT_DIR, { recursive: true });
 
-  const verdict = judge(payload);
+  const rate = fillRate(payload.capSweep);
+  const verdict = judge(payload, rate);
   const record = {
     issue: 'DOO-12',
     receivedAt: new Date().toISOString(),
     remoteAddress: req.socket.remoteAddress,
-    budgets: { p95Ms: P95_CEILING_MS, firstFrameMs: FIRST_FRAME_CEILING_MS, thermalRegression: THERMAL_REGRESSION },
+    budgets: {
+      p95Ms: P95_CEILING_MS,
+      firstFrameMs: FIRST_FRAME_CEILING_MS,
+      thermalRegression: THERMAL_REGRESSION,
+      frameBudgetMs: FRAME_BUDGET_MS,
+      shippedDprCap: SHIPPED_DPR_CAP,
+    },
     device,
     passes: payload.passes,
+    capSweep: payload.capSweep ?? null,
+    fillRate: rate,
     tainted: payload.tainted,
     verdict,
     suite: SUITE,
@@ -162,28 +201,86 @@ async function save(payload, req) {
   if (payload.tainted) console.log('⚠ TAINTED — the page was hidden during measurement; rerun with the screen awake.');
   for (const pass of payload.passes ?? []) {
     console.log(`\npass ${pass.index + 1}  first frame ${pass.firstFrameMs?.toFixed(0) ?? '—'}ms`);
-    console.log('dims     cells  draw   tri     fps    p95    cpu   dropped  build   repaint  pick');
+    console.log('dims     cells  draw   tri     fps    p95    cpu    sync  dropped  build   repaint  pick');
     for (const r of pass.rows) {
       console.log(
         `${r.dims.padEnd(8)} ${String(r.cells).padStart(4)}  ${String(r.drawCalls).padStart(4)} ` +
           `${String(r.triangles).padStart(6)} ${r.fps.toFixed(1).padStart(6)} ${r.p95Ms.toFixed(2).padStart(6)} ` +
-          `${r.cpuMs.toFixed(2).padStart(6)} ${String(r.droppedFrames).padStart(7)} ` +
+          `${r.cpuMs.toFixed(2).padStart(6)} ${num(r.syncMs, 2, 7)} ${String(r.droppedFrames).padStart(7)} ` +
           `${r.buildMs.toFixed(2).padStart(7)} ${r.repaintMs.toFixed(3).padStart(8)} ` +
           `${r.picked === null ? ' MISS' : String(r.picked).padStart(5)}` +
           (r.p95Ms > P95_CEILING_MS ? '   ⚠ p95' : ''),
       );
     }
   }
+
+  if (payload.capSweep?.length) {
+    console.log(`\ncap sweep — ${SWEEP_DIMS}, the only columns that see the fill axis`);
+    console.log('cap    buffer     bufferPx      p95   sync  syncP95  dropped');
+    for (const r of payload.capSweep) {
+      console.log(
+        `${String(r.cap).padEnd(5)} ${(r.pixelRatio?.toFixed(3) ?? '?').padStart(6)}x ${String(r.bufferPx ?? '?').padStart(12)} ` +
+          `${num(r.p95Ms, 2, 8)} ${num(r.syncMs, 2, 6)} ${num(r.syncP95Ms, 2, 8)} ${String(r.droppedFrames ?? '?').padStart(8)}`,
+      );
+    }
+    if (rate) {
+      console.log(
+        `\nfill rate: ${rate.msPerMegapixel.toFixed(3)} ms per megapixel ` +
+          `(r² ${rate.r2.toFixed(4)}, ${rate.points} points, intercept ${rate.interceptMs.toFixed(2)}ms)`,
+      );
+      console.log(
+        '  this is the number render/scene.js projected from an M1 Pro at a 5-10x divisor.',
+      );
+    }
+  }
   console.log('');
-  for (const line of verdict.lines) console.log(`${line.pass ? '  ok  ' : ' FAIL '} ${line.name}  — ${line.detail}`);
+  for (const line of verdict.lines) {
+    const mark = line.advisory ? ' note ' : line.pass ? '  ok  ' : ' FAIL ';
+    console.log(`${mark} ${line.name}  — ${line.detail}`);
+  }
   console.log(`\n${verdict.pass ? 'PASS' : 'FAIL'} — wrote ${file}`);
   console.log('paste that file into DOO-12. Ctrl+C when every phone is done.\n');
   return { file, verdict };
 }
 
+const num = (v, places, width) => (typeof v === 'number' ? v.toFixed(places) : '—').padStart(width);
+
+// Least squares of sync time against buffer area over the cap sweep. The slope is this
+// phone's fill rate; the intercept absorbs the per-frame cost that does not scale with
+// area (draw-call submission, the readPixels round trip itself), which is exactly why
+// the cap decision needs a regression and not a single absolute reading.
+//
+// render/scene.js picked the shipped cap by taking an M1 Pro's 0.95 ms/Mpx and dividing
+// by a literature 5-10x. This replaces that divisor with a measurement.
+function fillRate(sweep) {
+  const pts = (sweep ?? [])
+    .filter((r) => typeof r.syncMs === 'number' && typeof r.bufferPx === 'number' && r.bufferPx > 0)
+    .map((r) => ({ x: r.bufferPx / 1e6, y: r.syncMs }));
+  // Distinct buffer sizes, not distinct caps: a DPR-1.5 phone clamps caps 1.5 and 2 to
+  // the same buffer, and fitting a line through a repeated x is how a made-up slope
+  // gets into the record.
+  if (new Set(pts.map((p) => p.x.toFixed(4))).size < 3) return null;
+  const n = pts.length;
+  const mx = pts.reduce((a, p) => a + p.x, 0) / n;
+  const my = pts.reduce((a, p) => a + p.y, 0) / n;
+  const sxx = pts.reduce((a, p) => a + (p.x - mx) ** 2, 0);
+  const sxy = pts.reduce((a, p) => a + (p.x - mx) * (p.y - my), 0);
+  if (sxx === 0) return null;
+  const slope = sxy / sxx;
+  const intercept = my - slope * mx;
+  const ssTot = pts.reduce((a, p) => a + (p.y - my) ** 2, 0);
+  const ssRes = pts.reduce((a, p) => a + (p.y - (slope * p.x + intercept)) ** 2, 0);
+  return {
+    msPerMegapixel: slope,
+    interceptMs: intercept,
+    r2: ssTot === 0 ? 1 : 1 - ssRes / ssTot,
+    points: n,
+  };
+}
+
 // One judgement function, run on the server so the saved record and the phone's card
 // cannot disagree. The phone gets the result back in the POST response.
-function judge(payload) {
+function judge(payload, rate) {
   const passes = payload.passes ?? [];
   const rows = passes.flatMap((p) => p.rows ?? []);
   const lines = [];
@@ -230,6 +327,51 @@ function judge(payload) {
     detail: rows.every((r) => r.picked !== null) ? 'all sizes' : 'MISS',
   });
 
+  // The fill axis. Everything above is vsync-capped or CPU-only and would pass a phone
+  // that is one buffer-doubling away from missing frames; this is the only gate that
+  // notices. The suite rows run at the shipped cap, so their sync is the shipped cost.
+  const synced = rows.filter((r) => typeof r.syncP95Ms === 'number' && r.syncP95Ms > 0);
+  if (synced.length) {
+    const worstSync = synced.reduce((a, r) => (r.syncP95Ms > a.syncP95Ms ? r : a));
+    lines.push({
+      name: `GPU raster inside the 60fps budget at the shipped cap (sync p95 ≤ ${FRAME_BUDGET_MS.toFixed(1)}ms)`,
+      pass: synced.every((r) => r.syncP95Ms <= FRAME_BUDGET_MS),
+      detail:
+        synced.map((r) => `${r.dims}=${r.syncP95Ms.toFixed(1)}`).join(' ') +
+        `  worst ${worstSync.dims} @ ${worstSync.pixelRatio ?? '?'}x (${worstSync.bufferPx ?? '?'}px)`,
+    });
+  }
+
+  // Did the phone actually render at the cap we are judging? A DPR-1.75 phone never
+  // reaches cap 2, so its pass says nothing about the cap — the record has to say so
+  // out loud rather than letting a weaker test masquerade as the stronger one.
+  const ratios = rows.map((r) => r.pixelRatio).filter((n) => typeof n === 'number');
+  const dpr = payload.device?.dpr;
+  if (ratios.length) {
+    const atCap = Math.max(...ratios) >= SHIPPED_DPR_CAP - 0.05;
+    lines.push({
+      name: `drawing buffer sits at min(DPR, ${SHIPPED_DPR_CAP}) — setPixelRatio is live`,
+      pass: ratios.every((r) => Math.abs(r - Math.min(dpr ?? r, SHIPPED_DPR_CAP)) < 0.05),
+      detail:
+        `device dpr ${dpr ?? '?'} → buffer ${[...new Set(ratios.map((r) => r.toFixed(3)))].join('/')}x` +
+        (atCap ? '  (exercises the cap)' : `  ⚠ dpr < ${SHIPPED_DPR_CAP}: this phone cannot test the cap`),
+    });
+  }
+
+  if (rate) {
+    // The projection in render/scene.js that this measurement is here to replace:
+    // 1.41M buffer pixels at cap 2 on a 412x915 phone, which has to fit the budget
+    // alongside the CPU frame cost.
+    const atCap2 = rate.msPerMegapixel * 1.41 + rate.interceptMs;
+    lines.push({
+      name: `measured fill rate leaves head room at cap ${SHIPPED_DPR_CAP}`,
+      pass: atCap2 <= FRAME_BUDGET_MS,
+      detail:
+        `${rate.msPerMegapixel.toFixed(2)}ms/Mpx (r² ${rate.r2.toFixed(3)}) → ` +
+        `${atCap2.toFixed(1)}ms for 1.41Mpx vs ${FRAME_BUDGET_MS.toFixed(1)}ms budget`,
+    });
+  }
+
   // Thermal: same size, pass 2 against pass 1. A phone that holds 60fps cold and
   // drops when warm fails the budget in the way a player actually meets it.
   if (passes.length > 1) {
@@ -252,11 +394,37 @@ function judge(payload) {
     });
   }
 
-  return { pass: lines.every((l) => l.pass), lines };
+  // Advisory, not a gate. The team pass line is "60fps", and render/perf.js counts a
+  // drop against 16.7ms, so a 120Hz phone holding 16.7ms satisfies the line as written
+  // even though it is missing every other native vsync. Reported because "60fps on a
+  // 120Hz panel" is a visibly worse experience than the number suggests, and whether
+  // to tighten the line is Angerl's call, not QA's.
+  const hz = payload.device?.refreshHz;
+  if (typeof hz === 'number' && hz > 65) {
+    const nativeCeiling = (1000 / hz) * (P95_CEILING_MS / FRAME_BUDGET_MS);
+    lines.push({
+      advisory: true,
+      name: `[참고] ${hz}Hz 네이티브 주사율 기준 p95 ≤ ${nativeCeiling.toFixed(1)}ms`,
+      pass: rows.every((r) => r.p95Ms <= nativeCeiling),
+      detail:
+        rows.map((r) => `${r.dims}=${r.p95Ms.toFixed(1)}`).join(' ') +
+        '  — 합격선은 60fps이므로 판정에는 반영하지 않음',
+    });
+  }
+
+  return { pass: lines.every((l) => l.advisory || l.pass), lines };
 }
 
 function wrapperHtml() {
-  const config = JSON.stringify({ suite: SUITE, seconds: SECONDS, passes: PASSES });
+  const config = JSON.stringify({
+    suite: SUITE,
+    seconds: SECONDS,
+    passes: PASSES,
+    sweepDims: SWEEP_DIMS,
+    sweepCaps: SWEEP_CAPS,
+    sweepSeconds: SWEEP_SECONDS,
+    sweepSync: SWEEP_SYNC_SAMPLES,
+  });
   return `<!doctype html>
 <html lang="ko">
 <head>
@@ -280,6 +448,7 @@ function wrapperHtml() {
   .big { font-size: 26px; font-weight: 700; letter-spacing: .04em; padding: 10px 0; }
   .pass { color: #7fd48a; }
   .fail { color: #ff8d7a; }
+  .note { color: #8ec3e8; }
   ul { list-style: none; padding: 0; margin: 10px 0 18px; }
   li { padding: 5px 0; border-bottom: 1px solid #ffffff14; font-size: 13px; }
   li .mark { font-weight: 700; margin-right: 6px; }
@@ -294,7 +463,7 @@ function wrapperHtml() {
 <iframe id="frame" title="bench"></iframe>
 <div id="veil">
   <h1>no-nonogram 성능 측정</h1>
-  <div id="tip">측정하는 동안 <b>화면을 끄지 말고</b> 이 탭을 그대로 두세요. 약 70초 걸립니다.</div>
+  <div id="tip">측정하는 동안 <b>화면을 끄지 말고</b> 이 탭을 그대로 두세요. 약 90초 걸립니다.</div>
   <div id="progress">기기 정보 확인 중…</div>
 </div>
 <div id="card"></div>
@@ -369,42 +538,79 @@ function refreshRate() {
   });
 }
 
-function runPass(index) {
+// One iframe driver for both phases. The bench page is never modified; everything is
+// expressed as query params on it and read back off the window.__bench contract.
+function runBench(query, label, total) {
   return new Promise((done, fail) => {
-    const url = './bench/?suite=' + encodeURIComponent(CONFIG.suite) + '&sec=' + CONFIG.seconds + '&pass=' + index;
-    frame.src = url;
+    frame.src = './bench/?' + query;
     const started = Date.now();
     const poll = setInterval(() => {
       let bench;
       try { bench = frame.contentWindow.__bench; } catch { return; }
-      if (bench) {
-        const n = bench.results.length;
-        const total = CONFIG.suite.split(',').length;
-        progress.textContent = '패스 ' + (index + 1) + '/' + CONFIG.passes + ' — ' + n + '/' + total + ' 크기 완료';
-      }
+      if (bench) progress.textContent = label + ' — ' + bench.results.length + '/' + total + ' 완료';
       if (bench?.done) {
         clearInterval(poll);
-        done({ index, rows: bench.results, firstFrameMs: bench.perf().firstFrameMs });
+        done({ rows: bench.results, firstFrameMs: bench.perf().firstFrameMs });
       } else if (Date.now() - started > 1000 * 60 * 5) {
         clearInterval(poll);
-        fail(new Error('pass ' + index + ' timed out'));
+        fail(new Error(label + ' timed out'));
       }
     }, 400);
   });
 }
 
+function runPass(index) {
+  const query = 'suite=' + encodeURIComponent(CONFIG.suite) + '&sec=' + CONFIG.seconds + '&pass=' + index;
+  const total = CONFIG.suite.split(',').length;
+  return runBench(query, '패스 ' + (index + 1) + '/' + CONFIG.passes, total)
+    .then((r) => ({ index, ...r }));
+}
+
+// Phase 3 — sweep the retina cap on the worst size. The frame columns cannot see this
+// axis (DOO-19 measured p95 flat across caps 1 to 2.625), so without this the phone
+// reading cannot tell a cap that fits from one that is about to stop fitting.
+async function runCapSweep() {
+  const rows = [];
+  // The device's own DPR goes in above the shipped cap so the record also shows what
+  // capping cost in sharpness terms: if uncapped fits the budget too, cap 2 is leaving
+  // resolution on the table, and that is Vitra's call to make with a number in hand.
+  const caps = CONFIG.sweepCaps.slice();
+  if (devicePixelRatio > Math.max.apply(null, caps) + 0.05) caps.push(Number(devicePixelRatio.toFixed(3)));
+  for (const cap of caps) {
+    const query = 'suite=' + encodeURIComponent(CONFIG.sweepDims) + '&sec=' + CONFIG.sweepSeconds +
+      '&maxdpr=' + cap + '&sync=' + CONFIG.sweepSync;
+    const label = 'DPR 상한 ' + cap + '배 측정';
+    const out = await runBench(query, label, 1);
+    const r = out.rows[0];
+    if (r) rows.push({ cap, ...r });
+    await sleep(200);
+  }
+  return rows;
+}
+
+const cell = (v, places, width) => (typeof v === 'number' ? v.toFixed(places) : '—').padStart(width);
+
 function table(pass) {
-  const head = 'dims     cells draw   tri    fps    p95    cpu  drop  build repaint pick\\n';
+  const head = 'dims     cells draw   tri    fps    p95    cpu   sync drop  build repaint pick\\n';
   return head + pass.rows.map((r) =>
     r.dims.padEnd(8) + String(r.cells).padStart(5) + String(r.drawCalls).padStart(5) +
     String(r.triangles).padStart(7) + r.fps.toFixed(1).padStart(7) + r.p95Ms.toFixed(2).padStart(7) +
-    r.cpuMs.toFixed(2).padStart(6) + String(r.droppedFrames).padStart(6) +
+    r.cpuMs.toFixed(2).padStart(6) + cell(r.syncMs, 2, 7) + String(r.droppedFrames).padStart(5) +
     r.buildMs.toFixed(1).padStart(6) + r.repaintMs.toFixed(2).padStart(7) +
     (r.picked === null ? '  MISS' : String(r.picked).padStart(6))
   ).join('\\n');
 }
 
-function show(dev, passes, verdict, saveNote) {
+function sweepTable(rows) {
+  const head = 'cap   buffer      bufferPx    p95   sync syncP95 drop\\n';
+  return head + rows.map((r) =>
+    String(r.cap).padEnd(5) + cell(r.pixelRatio, 3, 7) + 'x' +
+    String(r.bufferPx ?? '?').padStart(12) + cell(r.p95Ms, 1, 7) +
+    cell(r.syncMs, 2, 7) + cell(r.syncP95Ms, 2, 7) + String(r.droppedFrames ?? '?').padStart(5)
+  ).join('\\n');
+}
+
+function show(dev, passes, sweep, verdict, saveNote) {
   frame.remove();
   veil.classList.add('hidden');
   card.classList.add('shown');
@@ -417,10 +623,13 @@ function show(dev, passes, verdict, saveNote) {
       '<br>' + (dev.renderer ?? 'GL 미확인') + '</div>' +
     (tainted ? '<div class="warn">⚠ 측정 중 화면이 꺼지거나 탭이 가려졌습니다 — 다시 측정하세요.</div>' : '') +
     '<ul>' + verdict.lines.map((l) =>
-      '<li><span class="mark ' + (l.pass ? 'pass' : 'fail') + '">' + (l.pass ? 'ok' : 'FAIL') + '</span>' +
+      '<li><span class="mark ' + (l.advisory ? 'note' : l.pass ? 'pass' : 'fail') + '">' +
+      (l.advisory ? '참고' : l.pass ? 'ok' : 'FAIL') + '</span>' +
       l.name + '<span class="detail">' + l.detail + '</span></li>').join('') + '</ul>' +
     passes.map((p) => '<div class="meta">패스 ' + (p.index + 1) + ' · first frame ' +
       (p.firstFrameMs?.toFixed(0) ?? '—') + 'ms</div><pre>' + table(p) + '</pre>').join('') +
+    (sweep?.length ? '<div class="meta">DPR 상한 스윕 · ' + CONFIG.sweepDims +
+      ' · 채움 축을 보는 유일한 열(sync)</div><pre>' + sweepTable(sweep) + '</pre>' : '') +
     '<div class="meta">' + saveNote + '</div>';
 }
 
@@ -433,7 +642,10 @@ function show(dev, passes, verdict, saveNote) {
     // Back-to-back on purpose: pass 2 reads the phone after it has warmed up.
     await sleep(300);
   }
-  const payload = { device: dev, passes, tainted, config: CONFIG };
+  // Last, so a sweep failure still leaves the suite numbers intact to report.
+  let sweep = [];
+  try { sweep = await runCapSweep(); } catch (err) { sweep = []; }
+  const payload = { device: dev, passes, capSweep: sweep, tainted, config: CONFIG };
   let verdict, note;
   try {
     const res = await fetch('./report', {
@@ -450,7 +662,7 @@ function show(dev, passes, verdict, saveNote) {
     // raw numbers with no verdict rather than inventing a second rule set here.
     verdict = { pass: false, lines: [{ name: '판정 불가 — 전송 실패', pass: false, detail: '아래 표를 캡처' }] };
   }
-  show(dev, passes, verdict, note);
+  show(dev, passes, sweep, verdict, note);
 })().catch((err) => {
   progress.textContent = '에러: ' + err.message;
 });
@@ -467,6 +679,7 @@ server.on('listening', () => {
 
   console.log('\n  no-nonogram — 폰 성능 측정 (DOO-12)\n');
   console.log(`  suite ${SUITE}   window ${SECONDS}s   passes ${PASSES}`);
+  console.log(`  dpr cap sweep ${SWEEP_DIMS} @ ${SWEEP_CAPS.join('/')}x (+ the device's own dpr)`);
   console.log('\n  같은 Wi-Fi에 연결된 안드로이드 폰 브라우저에서 아래 주소를 여세요:\n');
   for (const a of addrs) console.log(`      http://${a}:${PORT}`);
   if (!addrs.length) console.log('      (LAN 주소를 찾지 못했습니다 — Wi-Fi 연결을 확인하세요)');
