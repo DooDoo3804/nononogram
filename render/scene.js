@@ -15,6 +15,11 @@
 //
 // opts.maxPixelRatio   override the retina cap (default MAX_PIXEL_RATIO) — the
 //                      bench page sweeps it to pick the shipped value.
+// opts.fitMargin       override the framing slack (default FIT_MARGIN). Same reason
+//                      as above: the margin sets how much of the canvas the board
+//                      covers, which sets the fragment count, so it is an axis the
+//                      bench has to be able to sweep rather than a constant nobody
+//                      can price. See DOO-22.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -22,16 +27,22 @@ import { CELL_SIZE, GAP } from './voxels.js';
 
 const BACKGROUND = 0xecdfc0;
 
-// How much slack to leave around what has to stay in frame; 1 inscribes it exactly.
+// How much slack to leave around what has to stay in frame; 1 inscribes the fit sphere
+// exactly tangent to the narrower frustum plane.
+//
 // Calibrated, not chosen: a landscape phone has ~363 CSS px of board to work with and
-// the gate's cell-aperture floor needs ~341 of them, so there is no room to spend here.
-// A cube's silhouette is 90% of its own bounding sphere, so even at 1 the board stops
-// short of the canvas edge at every angle but the extreme ones.
-const FIT_MARGIN = 1;
+// the gate's cell-aperture floor needs ~341 of them, so there is very little room to
+// spend here. `tests/framing.test.js` pins the no-clip property at this value, and
+// `bench/?fitmargin=` prices what raising it would buy and cost.
+export const FIT_MARGIN = 1;
 
 // The opening view direction. Unchanged — what changed is that it no longer also
 // encodes the distance, which is why the old framing could not react to canvas shape.
 const VIEW_DIR = new THREE.Vector3(1, 0.85, 1).normalize();
+
+// Enough depth for every shipped board at every sane canvas shape; `setDepthRange`
+// only ever grows it, and only in the degenerate aspects that need it.
+const DEFAULT_FAR = 100;
 
 /**
  * Radius of the sphere the camera has to keep in frame for a dims-sized puzzle.
@@ -41,7 +52,7 @@ const VIEW_DIR = new THREE.Vector3(1, 0.85, 1).normalize();
  * cube's projected width swinging 22% between corner-on and face-on. The sphere costs
  * ~10% at the opening angle and is never wrong at any other.
  */
-function fitRadiusFor(dims) {
+export function fitRadiusFor(dims) {
   const span = (n) => (n - 1) * GAP + CELL_SIZE;
   const box = 0.5 * Math.hypot(span(dims.x), span(dims.y), span(dims.z));
   // render/gizmo.js puts each axis label at 1.15x its line's length and the sprite is
@@ -49,6 +60,45 @@ function fitRadiusFor(dims) {
   // they, not the box, set the frame.
   const label = ((Math.max(dims.x, dims.y, dims.z) * GAP) / 2 + 0.6) * 1.15 + 0.25;
   return Math.max(box, label);
+}
+
+/**
+ * Distance at which a sphere of `radius` is exactly tangent to the narrower of the two
+ * frustum side planes — `margin` scales that distance outwards.
+ *
+ * `sin`, not `tan`, and the difference is not cosmetic. `radius / tan(halfAngle)` is
+ * the *orthographic* fit: it inscribes a flat disc of that radius in the frame plane
+ * through the sphere's centre. Under perspective the frustum keeps narrowing in front
+ * of that plane, so the near half of the sphere pokes out — by `1/cos(halfAngle) - 1`,
+ * which at this camera's 45° fov is 8.2%. That is the whole of the clipping DOO-22
+ * asked about: at `tan` and margin 1, 6³ put its near-bottom corner 9.9% past the
+ * bottom of the canvas *at the opening shot*, on every canvas wider than it is tall —
+ * desktop included. `radius / sin(halfAngle)` is tangency, so the fit sphere is inside
+ * the frustum by construction and nothing can clip at any orbit angle.
+ *
+ * The horizontal half-angle is `atan(aspect * tan(halfV))`, so a portrait canvas is
+ * limited by its *width*. The old framing read neither axis: it fit to height alone and
+ * ignored the canvas shape entirely, so a tall narrow canvas ran the board off the sides
+ * while a short wide one used 58% of the height it had.
+ */
+export function fitDistanceFor(radius, { fov = 45, aspect = 1, margin = FIT_MARGIN } = {}) {
+  const halfV = (fov * Math.PI) / 360;
+  const halfH = Math.atan(Math.tan(halfV) * Math.max(aspect, 1e-6));
+  return (radius * margin) / Math.sin(Math.min(halfV, halfH));
+}
+
+/**
+ * Where to put the camera when the canvas changes shape, given where it is now.
+ *
+ * Zoom survives as a *ratio* of the framing distance, not as a distance: someone who
+ * had pulled in to half the opening shot is still at half of it after rotating the
+ * phone, rather than being thrown back out. Separated from `createView` so the property
+ * that matters can actually be asserted — this is idempotent, so the burst of resize
+ * events a mobile URL bar fires on every scroll cannot walk the camera anywhere.
+ */
+export function refitDistance(current, previousFit, nextFit) {
+  if (!(previousFit > 0)) return nextFit;
+  return (current / previousFit) * nextFit;
 }
 
 // Retina policy.
@@ -98,11 +148,11 @@ export function resolvePixelRatio(dpr, cap = MAX_PIXEL_RATIO) {
   return Math.min(device, ceiling);
 }
 
-export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO } = {}) {
+export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO, fitMargin = FIT_MARGIN } = {}) {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(BACKGROUND);
 
-  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, DEFAULT_FAR);
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -130,31 +180,51 @@ export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO } = {}) {
   let fitRadius = 0;
   let fitDistance = 0;
 
-  /** Distance at which `fitRadius` exactly fills the tighter of the two view half-angles. */
-  function distanceToFit() {
-    const halfHeight = Math.tan((camera.fov * Math.PI) / 360);
-    // A perspective camera's horizontal half-angle is the vertical one times the
-    // aspect, so a portrait canvas is limited by its *width*. The old framing read
-    // neither: it fit to height alone and ignored the canvas entirely, so a tall narrow
-    // canvas ran the board off the sides while a short wide one used 58% of the height
-    // it had. Both halves of DOO-13's unplayable board, one of them invisible until the
-    // layout fix made the canvas a sane shape.
-    return (fitRadius * FIT_MARGIN) / (halfHeight * Math.min(1, camera.aspect));
+  const distanceToFit = () =>
+    fitDistanceFor(fitRadius, { fov: camera.fov, aspect: camera.aspect, margin: fitMargin });
+
+  // Let OrbitControls re-derive its spherical state from the position we just wrote,
+  // then publish the result to the camera's world matrix.
+  //
+  // `controls.update()` only aims the camera (`lookAt` writes the quaternion);
+  // `matrixWorld` is refreshed by the *renderer*, one frame later. So without this,
+  // anything that reads the camera between a re-frame and the next draw — `rayFrom`
+  // above all — works off the previous pose. It cost the bench its cell-pick for one
+  // run, and it is the sort of bug that stays invisible in the app only because a
+  // player cannot tap inside the same tick as a resize.
+  function settle() {
+    controls.update();
+    camera.updateMatrixWorld();
+  }
+
+  // The fit distance grows without bound as the canvas narrows (radius / sin -> inf as
+  // the half-angle -> 0), where the old aspect-blind framing was capped at ~19.5 units
+  // for 6³. A fixed far plane of 100 would therefore cull the whole board on a canvas
+  // under ~0.15 aspect instead of merely shrinking it — a black screen, which is worse
+  // than a small board. Keep the default depth range when the fit is inside it.
+  function setDepthRange(distance) {
+    const far = Math.max(DEFAULT_FAR, distance + fitRadius * 2);
+    if (far !== camera.far) {
+      camera.far = far;
+      camera.updateProjectionMatrix();
+    }
   }
 
   /** Re-apply the fit for the current aspect, keeping orbit direction and zoom. */
   function refit() {
     if (!fitRadius) return;
     const want = distanceToFit();
-    // Zoom is preserved as a ratio, not a distance: someone who had zoomed to half the
-    // framing distance is still at half of it after rotating the phone, rather than
-    // being thrown back to the opening shot.
-    const zoom = fitDistance ? camera.position.distanceTo(controls.target) / fitDistance : 1;
+    // The current distance is read off the live camera rather than tracked alongside it,
+    // so a pinch OrbitControls has already applied is in the number. Deliberately
+    // unclamped at the near end: OrbitControls' own minDistance is where to bound how
+    // far in a player may go, and a second clamp here would fight it.
+    const next = refitDistance(camera.position.distanceTo(controls.target), fitDistance, want);
     const offset = camera.position.clone().sub(controls.target);
     if (offset.lengthSq() === 0) offset.copy(VIEW_DIR);
-    camera.position.copy(controls.target).add(offset.setLength(want * zoom));
+    camera.position.copy(controls.target).add(offset.setLength(next));
     fitDistance = want;
-    controls.update();
+    setDepthRange(Math.max(next, want));
+    settle();
   }
 
   function resize() {
@@ -175,11 +245,11 @@ export function createView(canvas, { maxPixelRatio = MAX_PIXEL_RATIO } = {}) {
 
   function frameCamera(dims) {
     fitRadius = fitRadiusFor(dims);
-    fitDistance = 0; // a new puzzle opens un-zoomed
     controls.target.set(0, 0, 0);
-    camera.position.copy(VIEW_DIR).multiplyScalar(distanceToFit());
-    fitDistance = camera.position.length();
-    controls.update();
+    fitDistance = distanceToFit();
+    camera.position.copy(VIEW_DIR).multiplyScalar(fitDistance);
+    setDepthRange(fitDistance);
+    settle();
   }
 
   function facingAxis() {

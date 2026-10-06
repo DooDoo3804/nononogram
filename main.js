@@ -21,10 +21,17 @@ import { mountRewards } from './fx/index.js';
 const SOLVED_TEXT = 'Solved! 🎉';
 
 const canvas = document.getElementById('scene');
-const view = createView(canvas);
-const perf = createPerfMonitor(view.renderer, {
-  overlay: new URLSearchParams(location.search).has('perf'),
+const query = new URLSearchParams(location.search);
+
+// `?fitmargin=` is the framing slack, overridable here for the same reason `?perf` is
+// (DOO-22): the margin decides how much of the canvas the board covers, which decides
+// the cell aperture the DOO-18 gate measures, so "would 1.1 be better?" has to be a
+// URL away rather than a rebuild. A bad value falls back to the shipped default.
+const fitMargin = Number(query.get('fitmargin'));
+const view = createView(canvas, {
+  ...(Number.isFinite(fitMargin) && fitMargin > 0 ? { fitMargin } : {}),
 });
+const perf = createPerfMonitor(view.renderer, { overlay: query.has('perf') });
 
 let session = null;
 let grid = null;

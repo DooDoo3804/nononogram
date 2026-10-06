@@ -16,13 +16,22 @@
 //                        This is the knob that picked the shipped cap: fill cost
 //                        scales with buffer area, so sweeping it on the mobile
 //                        profile is how the DOO-19 ceiling was measured.
+//   ?fitmargin=1         framing slack (default render/scene.js FIT_MARGIN).
+//   ?fit=sphere          which framing to measure (default `sphere`, the shipped one).
+//                        `tan` and `legacy` reproduce the two older framings so the
+//                        fill cost of tightening the frame is a measured delta rather
+//                        than an argument — see DOO-22. The `coverage` column is the
+//                        bridge between the two: it is the share of the canvas the
+//                        board's silhouette actually covers, which is what the
+//                        fragment count tracks.
 //
 // `window.__bench.done` flips true when every run is finished and
 // `window.__bench.results` holds the rows — that is the contract
 // `scripts/bench-render.mjs` drives.
 
-import { createView, MAX_PIXEL_RATIO } from '../render/scene.js';
-import { createVoxelGrid } from '../render/voxels.js';
+import * as THREE from 'three';
+import { createView, MAX_PIXEL_RATIO, FIT_MARGIN, fitRadiusFor } from '../render/scene.js';
+import { createVoxelGrid, CELL_SIZE, GAP } from '../render/voxels.js';
 import { createAxisGizmo } from '../render/gizmo.js';
 import { createPerfMonitor, FRAME_BUDGET_MS, FIRST_SCREEN_BUDGET_MS } from '../render/perf.js';
 import { mulberry32 } from '../puzzle.js';
@@ -39,6 +48,8 @@ const SECONDS = Number(params.get('sec') ?? 4);
 const FILL = Number(params.get('fill') ?? 0.45);
 const SPIN = params.get('spin') !== '0';
 const MAX_DPR = Number(params.get('maxdpr') ?? MAX_PIXEL_RATIO);
+const FIT_MARGIN_PARAM = Number(params.get('fitmargin') ?? FIT_MARGIN);
+const FIT = params.get('fit') ?? 'sphere';
 // Each sync sample stalls the pipeline for one whole frame's raster, so on software
 // raster at 2.6Mpx this probe costs ~100ms a sample. 24 is enough for a median and a
 // p95; `?sync=0` turns it off when only the frame-pacing columns are wanted.
@@ -52,7 +63,7 @@ function parseDims(text) {
 
 const canvas = document.getElementById('scene');
 const report = document.getElementById('report');
-const view = createView(canvas, { maxPixelRatio: MAX_DPR });
+const view = createView(canvas, { maxPixelRatio: MAX_DPR, fitMargin: FIT_MARGIN_PARAM });
 const perf = createPerfMonitor(view.renderer, { overlay: params.has('perf') });
 
 view.onFrame(() => perf.beginFrame());
@@ -76,6 +87,69 @@ function makeBoard(dims, fill) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+// The two framings that came before the shipped one, reproduced here rather than kept
+// as a branch in render/scene.js — production wants one correct path, and a perf
+// comparison wants all three. Both override `camera.position` after `frameCamera`, so
+// they only hold until the next `resize()`; this page never resizes mid-run.
+//
+//   legacy  pre-DOO-22: radius from the box's longest side, canvas shape ignored.
+//   tan     DOO-22 as first written: aspect-aware but an orthographic fit, which sits
+//           1/cos(fov/2) = 8.2% too close and clips the near corners.
+function overrideFraming(dims) {
+  if (FIT === 'sphere') return;
+  const dir = view.camera.position.clone().normalize();
+  let distance;
+  if (FIT === 'legacy') {
+    const r = Math.max(dims.x, dims.y, dims.z) * 1.8 + 1;
+    distance = Math.hypot(r, r * 0.85, r);
+  } else if (FIT === 'tan') {
+    const halfV = (view.camera.fov * Math.PI) / 360;
+    distance =
+      (fitRadiusFor(dims) * FIT_MARGIN_PARAM) /
+      (Math.tan(halfV) * Math.min(1, view.camera.aspect));
+  } else {
+    throw new Error(`unknown ?fit=${FIT} (want sphere|tan|legacy)`);
+  }
+  view.camera.position.copy(dir).multiplyScalar(distance);
+  view.controls.update();
+  view.camera.updateMatrixWorld();
+}
+
+// What share of the canvas the board's silhouette covers, from the projected corners of
+// the cell box. This is the quantity the fill cost actually tracks — `bufferPx` says how
+// many pixels exist, this says how many of them the board asks the fragment shader for.
+// Clamped to the canvas, because a clipped board cannot cost more than all of it.
+function coverage(dims) {
+  const span = (n) => (n - 1) * GAP + CELL_SIZE;
+  const h = [span(dims.x) / 2, span(dims.y) / 2, span(dims.z) / 2];
+  // `project()` reads `camera.matrixWorldInverse`, which only the renderer refreshes.
+  // The camera was just re-placed, so without this the extents describe the previous
+  // frame's pose.
+  view.camera.updateMatrixWorld();
+  let mx = 0;
+  let my = 0;
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const p = new THREE.Vector3(sx * h[0], sy * h[1], sz * h[2]).project(view.camera);
+        mx = Math.max(mx, Math.abs(p.x));
+        my = Math.max(my, Math.abs(p.y));
+      }
+    }
+  }
+  // `clipped` is the honest companion to `coverage`: a silhouette that saturates the
+  // canvas reads as high coverage precisely because part of the board is gone. The
+  // tolerance is there because a correct fit lands exactly *on* the edge — tangency is
+  // the goal, so bit noise at 1.0 must not read as a clip.
+  return {
+    coverage: Math.min(1, mx) * Math.min(1, my),
+    extentX: mx,
+    extentY: my,
+    distance: view.camera.position.distanceTo(view.controls.target),
+    clipped: Math.max(mx, my) > 1.001,
+  };
+}
 
 // Fill-rate probe — the number a DPR cap decision needs, and the one neither
 // existing frame metric can supply. `frameMs` is vsync-capped and `cpuMs` brackets
@@ -122,6 +196,7 @@ async function run(dims) {
   const gizmo = createAxisGizmo(dims);
   view.scene.add(gizmo.group);
   view.frameCamera(dims);
+  overrideFraming(dims);
   const buildMs = performance.now() - buildAt;
 
   // Let shader compiles and the first upload of the instance matrices land outside
@@ -138,6 +213,13 @@ async function run(dims) {
   view.controls.autoRotate = false;
   const s = perf.stats();
 
+  // Put the camera back on the opening shot before anything downstream reads it, so
+  // `coverage` and the fill probe both describe one fixed, reproducible view instead of
+  // wherever the spin happened to stop. The repaint and pick below give OrbitControls'
+  // damping a few frames to shed the spin's residual before the probe starts.
+  view.frameCamera(dims);
+  overrideFraming(dims);
+
   // One repaint of every cell, timed: this is the cost of `setAll` on a state
   // restore, and on the instanced path it is one buffer upload rather than N
   // material swaps.
@@ -149,6 +231,8 @@ async function run(dims) {
   // camera axis at the board centre and see whether a cell answers.
   const picked = grid.pick(view.rayFrom(centerEvent(canvas)));
 
+  const shot = coverage(dims);
+
   // After the window, never inside it: the sync stalls the pipeline on purpose and
   // would show up as dropped frames in the numbers above.
   const fill = await probeFill();
@@ -159,6 +243,16 @@ async function run(dims) {
     // The fill-rate denominator: what the DPR cap actually bought in buffer pixels.
     pixelRatio: round(view.pixelRatio(), 3),
     bufferPx: canvas.width * canvas.height,
+    fit: FIT,
+    fitMargin: FIT_MARGIN_PARAM,
+    // Fragment demand, not just buffer size: the share of the canvas the board covers
+    // and whether it is covering that much by overflowing the edge.
+    coverage: round(shot.coverage, 4),
+    extentX: round(shot.extentX, 4),
+    extentY: round(shot.extentY, 4),
+    fitDistance: round(shot.distance, 3),
+    clipped: shot.clipped,
+    boardPx: Math.round(shot.coverage * canvas.width * canvas.height),
     ...grid.stats(),
     drawCalls: s.drawCalls,
     triangles: s.triangles,
@@ -201,13 +295,15 @@ function render() {
     `first screen ≤ ${FIRST_SCREEN_BUDGET_MS}ms   (window ${SECONDS}s, fill ${FILL}, spin ${SPIN ? 'on' : 'off'})\n` +
     `dpr: device ${devicePixelRatio} cap ${MAX_DPR} → buffer ${view.pixelRatio()}x ` +
     `(${canvas.width}x${canvas.height} for ${canvas.clientWidth}x${canvas.clientHeight} css)\n` +
+    `fit: ${FIT} margin ${FIT_MARGIN_PARAM}   aspect ${(canvas.clientWidth / canvas.clientHeight).toFixed(3)}\n` +
     `first frame: ${perf.stats().firstFrameMs?.toFixed(0) ?? '—'}ms\n\n` +
-    'dims     cells  draw  tri     fps   gap    p95    cpu     sync    dropped  build   repaint  pick\n';
+    'dims     cells  draw  tri     fps   gap    p95    cpu     sync    cover  dropped  build   repaint  pick\n';
   const rows = results.map(
     (r) =>
       `${r.dims.padEnd(8)} ${String(r.cells).padStart(4)}  ${String(r.drawCalls).padStart(4)}  ` +
       `${String(r.triangles).padStart(6)}  ${r.fps.toFixed(1).padStart(5)} ${r.frameMs.toFixed(2).padStart(6)} ` +
       `${r.p95Ms.toFixed(2).padStart(6)} ${r.cpuMs.toFixed(3).padStart(7)} ${r.syncMs.toFixed(2).padStart(7)} ` +
+      `${(r.coverage * 100).toFixed(1).padStart(5)}%${r.clipped ? '*' : ' '}` +
       `${String(r.droppedFrames).padStart(8)} ${r.buildMs.toFixed(2).padStart(7)} ${r.repaintMs.toFixed(3).padStart(8)} ` +
       `${r.picked === null ? ' MISS' : String(r.picked).padStart(5)}` +
       (r.over.length ? `   ⚠ ${r.over.join(',')}` : ''),

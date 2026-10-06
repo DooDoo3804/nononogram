@@ -49,6 +49,13 @@ const SECONDS = process.env.BENCH_SECONDS ?? '4';
 // Unset ships the cap from render/scene.js. BENCH_MAX_DPR overrides it, which is how
 // the cap was swept to pick a value — see DOO-19.
 const MAX_DPR = process.env.BENCH_MAX_DPR;
+// The framing axis (DOO-22). Unset ships `render/scene.js`'s fit; `BENCH_FIT=tan` and
+// `BENCH_FIT=legacy` reproduce the two framings that came before it, and
+// `BENCH_FIT_MARGIN` sweeps the slack. Fill cost tracks how much of the canvas the
+// board covers, and the framing is what decides that, so it belongs on the same
+// instrument as the DPR cap rather than in an argument.
+const FIT = process.env.BENCH_FIT;
+const FIT_MARGIN = process.env.BENCH_FIT_MARGIN;
 // 'auto' = this machine's GPU (see the header). 'software' forces SwiftShader, which
 // is the pessimistic fill-axis reading; its timing checks go advisory because the
 // budgets here were set against hardware GL and software raster misses them by design.
@@ -86,9 +93,18 @@ const MIN_PIXEL_RATIO_CAP = 2;
 // commit cannot cause them.
 const QUIET_LOAD = cpus().length * 0.5;
 
+// `mobile-land-4x` is the same handset turned sideways, and it is not redundant with
+// `mobile-4x` (DOO-22). Fill cost tracks the share of the canvas the board covers, and
+// an aspect-aware framing fits to the *narrower* half-angle: on a portrait canvas that
+// is the width, which pushes the camera back, while on a landscape one it is the height,
+// which pulls it in. So the portrait profile measures the orientation where the framing
+// is cheapest and the landscape one measures where it is dearest — gating only on
+// portrait would have left the worse half of the fill axis unmeasured. Same DPR, same
+// CPU factor, so the two rows differ in canvas shape and nothing else.
 const ALL_PROFILES = [
   { name: 'desktop', width: 1280, height: 860, deviceScaleFactor: 1, mobile: false, cpuThrottle: 1 },
   { name: 'mobile-4x', width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true, cpuThrottle: 4 },
+  { name: 'mobile-land-4x', width: 915, height: 412, deviceScaleFactor: 2.625, mobile: true, cpuThrottle: 4 },
 ];
 
 // A full run is both profiles; BENCH_PROFILES narrows it. That exists so a sweep is a
@@ -116,7 +132,11 @@ for (const profile of PROFILES) {
   const page = await browser.newPage();
   await page.emulate(profile);
 
-  const url = `${BASE}/bench/?suite=${SUITE}&sec=${SECONDS}${MAX_DPR ? `&maxdpr=${MAX_DPR}` : ''}`;
+  const url =
+    `${BASE}/bench/?suite=${SUITE}&sec=${SECONDS}` +
+    `${MAX_DPR ? `&maxdpr=${MAX_DPR}` : ''}` +
+    `${FIT ? `&fit=${FIT}` : ''}` +
+    `${FIT_MARGIN ? `&fitmargin=${FIT_MARGIN}` : ''}`;
   console.log(`--- ${profile.name}  ${profile.width}x${profile.height}@${profile.deviceScaleFactor} cpu/${profile.cpuThrottle}`);
   await page.goto(url);
 
@@ -161,8 +181,16 @@ for (const profile of PROFILES) {
   // readPixels after the draw, which cannot be served until the raster finishes. The
   // other timing columns are vsync-capped or bracket only our own code, so they read
   // identically whether the buffer is 1x or 9x. This one moves with buffer area.
+  // `cover` is what turns `sync` from a number into an explanation: fill cost is
+  // fragments, and fragments are buffer pixels times the share of them the board asks
+  // for. A `*` means the silhouette is only that large because it is running off the
+  // canvas edge, which is a framing bug rather than a cheap frame.
   console.log(
-    'dims     cells  draw   tri    fps    gap    p95    cpu     sync   sync-p95  dropped  build   repaint  pick',
+    `fit: ${rows[0]?.fit ?? '—'} margin ${rows[0]?.fitMargin ?? '—'}  ` +
+      `canvas aspect ${(profile.width / profile.height).toFixed(3)}`,
+  );
+  console.log(
+    'dims     cells  draw   tri    fps    gap    p95    cpu     sync   sync-p95  cover  dropped  build   repaint  pick',
   );
   for (const r of rows) {
     console.log(
@@ -170,6 +198,7 @@ for (const profile of PROFILES) {
         `${String(r.triangles).padStart(6)} ${r.fps.toFixed(1).padStart(6)} ${r.frameMs.toFixed(2).padStart(6)} ` +
         `${r.p95Ms.toFixed(2).padStart(6)} ${r.cpuMs.toFixed(3).padStart(7)} ${r.syncMs.toFixed(2).padStart(6)} ` +
         `${r.syncP95Ms.toFixed(2).padStart(9)} ` +
+        `${(r.coverage * 100).toFixed(1).padStart(5)}%${r.clipped ? '*' : ' '}` +
         `${String(r.droppedFrames).padStart(8)} ${r.buildMs.toFixed(2).padStart(7)} ${r.repaintMs.toFixed(3).padStart(8)} ` +
         `${r.picked === null ? ' MISS' : String(r.picked).padStart(5)}` +
         (r.over.length ? `   OVER ${r.over.join(',')}` : ''),
@@ -187,7 +216,7 @@ for (const profile of PROFILES) {
 // --- the gate ---------------------------------------------------------------
 
 const desktop = runs.desktop;
-const mobile = runs['mobile-4x'];
+const mobiles = Object.values(runs).filter((r) => r.profile.mobile);
 const biggest = (run) => run.rows[run.rows.length - 1];
 
 // Did we get the backend we asked for? The failure mode is silent — DOO-20's flags
@@ -269,12 +298,14 @@ for (const [name, run] of Object.entries(runs)) {
   );
 }
 
-if (mobile) {
+for (const mobile of mobiles) {
+  const name = mobile.profile.name;
+
   // 60fps on the mobile proxy — judged at *every* size, not just the biggest. rAF is
   // vsync-capped, so the signal is "frames land on vsync", not an average under 16.7ms.
   const worstP95 = mobile.rows.filter((r) => r.p95Ms > P95_CEILING_MS);
   check(
-    `mobile-4x: holds 60fps at every size (p95 ≤ ${P95_CEILING_MS}ms)`,
+    `${name}: holds 60fps at every size (p95 ≤ ${P95_CEILING_MS}ms)`,
     worstP95.length === 0,
     mobile.rows.map((r) => `${r.dims}=${r.p95Ms.toFixed(1)}ms`).join(' '),
     timing,
@@ -282,7 +313,7 @@ if (mobile) {
 
   const tooManyDrops = mobile.rows.filter((r) => r.droppedFrames > r.frames * DROPPED_FRAME_ALLOWANCE);
   check(
-    `mobile-4x: dropped frames under ${(DROPPED_FRAME_ALLOWANCE * 100).toFixed(0)}% at every size`,
+    `${name}: dropped frames under ${(DROPPED_FRAME_ALLOWANCE * 100).toFixed(0)}% at every size`,
     tooManyDrops.length === 0,
     mobile.rows.map((r) => `${r.dims}=${r.droppedFrames}/${r.frames}`).join(' '),
     timing,
@@ -290,10 +321,27 @@ if (mobile) {
 
   const overCpu = mobile.rows.filter((r) => r.cpuMs >= 1000 / 60);
   check(
-    'mobile-4x: cpu work per frame inside 16.7ms at every size',
+    `${name}: cpu work per frame inside 16.7ms at every size`,
     overCpu.length === 0,
     mobile.rows.map((r) => `${r.dims}=${r.cpuMs.toFixed(2)}ms`).join(' '),
     timing,
+  );
+}
+
+// The framing must not reach the board into frame by pushing it out of the canvas
+// (DOO-22). Hardware-independent — it is the projected corners of the cell box, so it
+// gates on every machine and every backend, unlike the timing columns. Skipped when the
+// run is a deliberate sweep of the framing itself, since `tan`/`legacy` clip by
+// definition and that is the point of measuring them.
+for (const [name, run] of Object.entries(runs)) {
+  const clipped = run.rows.filter((r) => r.clipped);
+  check(
+    `${name}: the whole board stays inside the canvas at the opening shot`,
+    FIT || FIT_MARGIN ? true : clipped.length === 0,
+    FIT || FIT_MARGIN
+      ? `skipped — BENCH_FIT=${FIT ?? 'default'} margin=${FIT_MARGIN ?? 'default'} sweep, ` +
+          `${clipped.length}/${run.rows.length} clipped`
+      : run.rows.map((r) => `${r.dims}=${(r.coverage * 100).toFixed(1)}%${r.clipped ? ' CLIPPED' : ''}`).join(' '),
   );
 }
 
