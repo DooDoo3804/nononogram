@@ -4111,3 +4111,45 @@ at is one a real click can reach`, `the correction pass left no reachable cell w
 | 데스크톱 5개 + 모바일 24개 완주 | 돌고 있는 레일 | 진행 중, 모니터 무장 |
 | reach 표 1회 재측정 | QA, **DOO-36 뒤** | 대기 (Vitra) |
 | `master` → `t-ui-peel` fast-forward | **Angerl 결정** (DOO-38) | §31.2 — 퍼즐 24/24와 무관한 차단 사유 |
+
+### 32.6 **결함 L은 결함 V의 증상이었다** — 같은 퍼즐의 수정 전/후 한 쌍
+
+§22가 모바일 **23/24**로 판정하며 남긴 **유일한 실패 `l3-bird`(결함 L, 원인 미확정)**가
+무엇이었는지, 기존 로그 두 개가 같은 퍼즐의 전/후를 갖고 있다. 새 측정 없이 확정했다.
+
+| | |
+|---|---|
+| **재현 절차** | 결함 V 수정 **전** 하네스로 `playtest.mjs play --platform=mobile` 를 `l3-bird`에 돌린다 (`/tmp/doo8-trace/l3bird-mobile3.log`) |
+| **기대** | 요구 34셀을 34탭으로 칠하고 `solved=true` |
+| **실제** | `34 taps +12 fix  solved=false  wrong=2` — 보정 12회가 **수렴하지 않았다**. `8/12 checks passed`, `FAIL mobile: all 1 puzzles finished with real input — 0/1` |
+| **증거** | 같은 로그의 추적 줄이 기전을 직접 보여준다 (아래) |
+
+```
+r2 cell 119 1->0 px=[206,718] peel=0
+   shadowPx=[206,718] delta=[0,0] inCanvas=true
+   2 tap(s) moved 2 cell(s): [[{"cell":119,"from":2,"to":0}],[{"cell":119,"from":0,"to":1}]]
+```
+
+**탭 1회에 셀 전이가 2회다.** 보정 탭이 셀을 `2→0`으로 옮긴 직후 유령 클릭이 `0→1`로 한 칸
+더 돌린다. 목표 상태에 **영원히 착지하지 못하므로** `r2` 보정 라운드가 같은 두 셀
+(119·124)을 12회 두드리고 `wrong=2`로 끝난다. §29가 지목한 **제로 크기 궤도가 클릭으로
+디스패치되던 그 경로**이고, `delta=[0,0]`이 바로 그 지문이다.
+
+수정 **후** 같은 퍼즐 (`l3bird-fixed.log`, 동일 프로파일 412×915@2.625 cpu/4):
+
+| | 수정 전 | 수정 후 |
+|---|---|---|
+| 탭 / 보정 | 34 taps **+12 fix** | 34 taps **+0 fix** |
+| `solved` | **false** | **true** |
+| `wrong` | **2** | **0** |
+| 체크 | **8/12** | **14/14** |
+| 판정 줄 | ` FAIL  mobile: ... — 0/1` | `  ok   mobile: ... — 1/1` |
+
+**결함 L을 닫는다 — 원인은 결함 V이고, 별개 결함이 아니었다.** §22의 모바일 23/24가
+가리킨 단 하나의 실패가 하네스 쪽 유령 클릭이었다는 뜻이고, 따라서 §22의 분자 23은
+**제품의 수치가 아니다**. 돌고 있는 모바일 레일이 이것을 24개 전체에서 확인한다.
+
+덤으로 드라이버의 `ABSENT` 탐지가 실제로 동작함을 확인했다 — 위 두 판정 줄이
+`grep -E "^[[:space:]]+(ok|FAIL|warn)[[:space:]]+mobile: all [0-9]+ puzzles finished"` 에
+양쪽 형태(`ok` 두 칸 / `FAIL` 한 칸) 전부 매칭한다. §19 결함 I가 만든 "매칭 못 하는 grep의
+침묵을 통과로 읽는" 경로는 닫혀 있다.
