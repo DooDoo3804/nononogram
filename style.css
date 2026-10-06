@@ -1,3 +1,21 @@
+/* The display face ships inside the artifact instead of coming from
+   fonts.googleapis.com, so `dist/` needs nothing but its own origin — on a network that
+   cannot reach Google the old `<link>` logged a failed request and dropped the wordmark
+   to Georgia silently (DOO-40). `ui/fonts/README.md` has the provenance, the licence,
+   and why the subset is wider than the text we render today.
+
+   One face, not two: the file is variable on `wght`, so the 700 `.screen-title` asks and
+   the 800 `.brand h1` asks both resolve out of these same 24kB. `swap` because this is a
+   wordmark — showing it late is fine, not showing it is not. Vite hashes the file out of
+   this relative `url()`, which is what keeps it resolvable under `base: './'`. */
+@font-face {
+  font-family: "Playfair Display";
+  font-style: normal;
+  font-weight: 400 900;
+  font-display: swap;
+  src: url("./ui/fonts/playfair-display-v40-subset.woff2") format("woff2");
+}
+
 :root {
   color-scheme: light;
   --paper: #ecdfc0;

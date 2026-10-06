@@ -4,10 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>no-nonogram</title>
+  <!-- No third-party host on the first-paint path. Playfair Display used to arrive from
+       Google Fonts over two preconnects and a render-blocking stylesheet, which meant the
+       deploy artifact was not complete on its own: behind a firewall the request failed
+       and the wordmark fell back without a word (DOO-40). It is now a `@font-face` in
+       style.css over ui/fonts/, so a grep of this artifact for a foreign host finds
+       nothing — including here. -->
   <link rel="stylesheet" href="./style.css" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet" />
 </head>
 <body>
   <svg width="0" height="0" style="position: absolute" aria-hidden="true">
