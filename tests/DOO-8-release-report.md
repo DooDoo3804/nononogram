@@ -344,31 +344,48 @@ cpu/프레임은 모든 칸에서 0.24–0.79ms — 16.7ms 예산의 5% 미만. 
   못한다(6³ p95 33ms). 폰 판정은 아니지만, 5~10배가 괄호의 가장자리가 아니라 **안쪽**에
   있음을 보인다 (DOO-20).
 
-**→ 남은 작업 (프로덕션 코드, QA 소유 아님):** 취소된 DOO-12를 가리키는 주석 2곳.
-- `render/scene.js:141` — "The knee's real location is still DOO-12's to find"
-- `scripts/bench-render.mjs:31` — "and DOO-12 still needs a device."
+**주석 정리 — DOO-26, 해소됨 (`b317c88`).** 취소된 DOO-12를 "앞으로 답이 나올 곳"으로
+가리키던 프로덕션 주석 2곳(`render/scene.js:141`, `scripts/bench-render.mjs:31`)은 플랫폼
+트랙 파일이라 QA가 고치지 않고 **DOO-26으로 위임**했고, Vitra가 같은 하트비트 안에 고쳤다.
+확인한 현재 문구:
 
-둘 다 플랫폼 트랙 파일이라 QA가 고치지 않는다. **DOO-24로 위임**했고 DOO-8의 선행으로
-걸었다 — 판정문이 취소된 이슈를 근거로 가리키는 상태로는 릴리스 노트를 낼 수 없다.
+```
+render/scene.js:142   The physical device reading is no longer a release condition
+                      — DOO-12 is cancelled, by board decision — so real GPU
+                      bandwidth, thermal throttling and the browser compositor
+                      stay unverified for this cap, and the release notes say that
+                      outright instead of implying a measurement is pending.
+render/scene.js:130   0.95ms/Mpx is the only measured term; the 5-10x it is divided
+                      by is literature, not a reading off a handset.
+```
+
+`grep -rn "DOO-12" render/ scripts/` 가 남기는 2줄은 이제 **"cancelled"임을 명시하는 줄**이고,
+캡을 다시 움직이려면 새 이슈가 필요하다는 문장까지 들어갔다. `MAX_PIXEL_RATIO = 2` 값은
+변경 없음, `vitest` 446/446 · `eslint` 0. 위 단서 2개가 코드 주석과 릴리스 노트 양쪽에서
+같은 말을 한다 — 판정문이 죽은 이슈를 인용하는 문제는 없다.
 
 ---
 
 ## 11. 판정 선행 원장 (`scope = all` — 전부 닫혀야 판정 시작)
 
-보드가 지정한 선행 5건 + QA가 게이트 근거로 추가한 2건 (DOO-23 · DOO-24).
+보드가 지정한 선행 5건 + QA가 게이트 근거로 추가한 2건 (DOO-23 · DOO-26).
 
-| 이슈 | 담당 | 우선순위 | 상태 (2026-10-06 16:30) |
+| 이슈 | 담당 | 우선순위 | 상태 (2026-10-06 16:35) |
 |---|---|---|---|
 | **DOO-17** 내부 셀 조준 24×24px | Vitra | high | **todo** ← 유일한 실작업 선행 |
 | **DOO-23** 축 색 사본 드리프트 | Pixa | medium | **in_progress** — 수정은 작업 트리에 있고 커밋만 남음 (아래) |
-| **DOO-24** 취소된 DOO-12 주석 2곳 정리 | Vitra | low | **todo** — 이번 하트비트에 위임 |
+| ~~DOO-26 취소된 DOO-12 주석 2곳 정리~~ | Vitra | low | **done** — `b317c88` (이번 하트비트에 위임 → 당일 해소) |
 | ~~DOO-21 썸네일 DPR~~ | Pixa | medium | **done** — `c70be92`, `d117dfa` |
-| ~~DOO-16 드래그 칠하기~~ | Vitra | low | **done** — `6c85f0a` |
+| ~~DOO-16 드래그 칠하기~~ | Vitra | low | **done** — `6c85f0a`, `e70f4a5` |
 | ~~DOO-15 끊긴 보셀 모양 3개~~ | Solvera | medium | **done** — `50b4340` |
 | ~~DOO-11 축 색 드리프트 가드~~ | Proba | low | **done** — `cb98dd8` |
 
-보드가 지정한 선행 5건 중 **4건(DOO-11·DOO-15·DOO-21·DOO-16)이 닫혔다.** 남은 실작업은
-DOO-17 하나이고, 거기에 QA가 게이트 근거로 DOO-23·DOO-24를 추가했다.
+보드가 지정한 선행 5건 중 **4건(DOO-11·DOO-15·DOO-21·DOO-16)이 닫혔고**, QA가 추가한
+DOO-26도 닫혔다. 남은 것은 **DOO-17(실작업) + DOO-23(커밋) 2건**이다.
+
+> DOO-24(`[썸네일 프레이밍] drawThumb`)는 DOO-8의 선행이 **아니다.** 선행을 배선할 때
+> 동시에 생성된 다른 이슈의 ID를 잘못 걸었다가 같은 하트비트에 바로 뺐다. QA가 평가하지
+> 않은 이슈로 릴리스를 막지 않는다.
 
 ### 1차 판정의 차단 사유는 해소됐다
 
@@ -383,13 +400,13 @@ DOO-17 하나이고, 거기에 QA가 게이트 근거로 DOO-23·DOO-24를 추�
 
 | | |
 |---|---|
-| **재현 절차** | `git stash && npx vitest run tests/axis-colors.test.js` — 브랜치 `t-ui-viewport`, 커밋 `d117dfa` |
+| **재현 절차** | `git stash && npx vitest run tests/axis-colors.test.js` — 브랜치 `t-ui-viewport`, 커밋 `e70f4a5` |
 | **기대** | 446/446. 축 색 사본이 `style.css` · `render/gizmo.js` 양쪽에서 일치 |
 | **실제** | **445/446.** 커밋된 `style.css:19-21`은 `#b5533f / #5f8a52 / #4a6fa5`, `render/gizmo.js:19`는 `#9e3f2c / #436a39 / #3d5c8c` — 세 축 전부 다르다. 대비 1.32–1.56:1로 화면에서 구별 불가 |
 | **스크린샷** | 아래 콘솔 출력 — 가드가 네 사본의 실제 값을 찍어 준다 (DOO-11이 이걸 위해 있다) |
 
 ```
-$ npx vitest run        # 커밋 d117dfa, 미커밋 변경 제외
+$ npx vitest run        # 커밋 e70f4a5, 미커밋 변경 제외
 Test Files  1 failed | 18 passed (19)
      Tests  1 failed | 445 passed (446)
 
@@ -426,7 +443,7 @@ $ npx eslint .          # exit 0
 다시 채운다. 재측정 대상은 **성능이 아니라 플레이 가능성과 게이트**다 (§9는 확정).
 
 ```sh
-npx vitest run && npx eslint . && npm run build    # 커밋 d117dfa 기준 vitest 빨감 (DOO-23)
+npx vitest run && npx eslint . && npm run build    # 커밋 e70f4a5 기준 vitest 빨감 (DOO-23)
 npm run serve:dist &
 node tests/playtest.mjs reach http://127.0.0.1:4173 qa-out --platform=mobile --step=10
 node tests/playtest.mjs play  http://127.0.0.1:4173 qa-out --platform=mobile
