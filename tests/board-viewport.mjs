@@ -454,13 +454,18 @@ try {
   // it: the first proves the cap is enforced, the second proves the ratio is still read
   // from the device rather than pinned to a constant. Trimming VIEWPORTS down to DPR-1
   // entries would otherwise make this whole tag unfalsifiable while still printing green.
-  const measured = results.filter((r) => r.scene.width > 0);
+  //
+  // Asserted against the *declared* VIEWPORTS, never the rows actually run: this is a
+  // drift guard on the matrix definition, and the one thing it must not do is fire
+  // because someone narrowed a debugging run to a single viewport. (It did exactly that
+  // on first write — `--require=render ... pixel` failed on a build whose renderer was
+  // correct, because `pixel` alone is alldpr 2.625.)
+  const dprs = [...new Set(VIEWPORTS.map((v) => v.deviceScaleFactor))].sort((a, b) => a - b);
+  const declared = `VIEWPORTS declares DPRs: ${dprs.join(', ')}`;
   check(`[render] the matrix exercises the cap (some viewport has DPR > ${SHIPPED_DPR_CAP})`,
-    measured.some((r) => r.dpr > SHIPPED_DPR_CAP + DPR_TOLERANCE),
-    `device DPRs measured: ${[...new Set(measured.map((r) => r.dpr))].sort((a, b) => a - b).join(', ')}`);
+    dprs.some((d) => d > SHIPPED_DPR_CAP + DPR_TOLERANCE), declared);
   check(`[render] the matrix also covers DPR <= ${SHIPPED_DPR_CAP}, where the cap is inert`,
-    measured.some((r) => r.dpr <= SHIPPED_DPR_CAP + DPR_TOLERANCE),
-    `device DPRs measured: ${[...new Set(measured.map((r) => r.dpr))].sort((a, b) => a - b).join(', ')}`);
+    dprs.some((d) => d <= SHIPPED_DPR_CAP + DPR_TOLERANCE), declared);
 
   const errs = page.errors().filter((t) => !IGNORED_NOISE.test(t));
   check('[ui] no console errors across the whole matrix', errs.length === 0, errs.slice(0, 3).join(' | '));
