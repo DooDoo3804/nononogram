@@ -83,6 +83,16 @@ export function createPerfMonitor(renderer, { overlay = false, label = '' } = {}
     document.body.appendChild(el);
   }
 
+  /**
+   * A milestone, in ms since *navigation start* — `performance.now()`'s own origin, and
+   * the right one for `first-frame`, which nothing but the page can trigger.
+   *
+   * The trap is milestones a *harness* triggers, like `first-puzzle`: whatever the
+   * harness spent walking to the click is inside the mark, so comparing the raw value
+   * against a budget measures the harness too (DOO-41 — 1374ms of 1853ms was pacing).
+   * To get the product's share, stamp `performance.now()` inside the page immediately
+   * before triggering, and subtract. `scripts/verify-browser.mjs` does exactly that.
+   */
   function mark(name) {
     marks[name] = performance.now();
   }

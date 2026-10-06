@@ -18,7 +18,8 @@
     "serve:dist": "vite preview --port 4173 --strictPort --host 127.0.0.1",
     "verify": "node scripts/verify-browser.mjs http://127.0.0.1:4173 verify-out",
     "perf": "node scripts/bench-render.mjs http://127.0.0.1:4173 verify-out/bench.json",
-    "aim": "node scripts/probe-aim.mjs http://127.0.0.1:4173 verify-out/aim.json"
+    "aim": "node scripts/probe-aim.mjs http://127.0.0.1:4173 verify-out/aim.json",
+    "probe:pacing": "node scripts/probe-mark-pacing.mjs http://127.0.0.1:4173"
   },
   "dependencies": {
     "three": "0.160.1"
